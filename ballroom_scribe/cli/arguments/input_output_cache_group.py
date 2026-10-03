@@ -7,6 +7,7 @@ from .group_abc import Group, GroupArgs
 
 class InputCacheArgs(GroupArgs):
     input_video: pathlib.Path
+    input_channel: int
     cache_dir: pathlib.Path
 
 
@@ -25,6 +26,11 @@ class _InputCacheGroupBase[Resolved: InputCacheArgs](Group[Resolved]):
             help="Path to input video file",
         )
         parser.add_argument(
+            "input_channel",
+            type=int,
+            help="Zero-based index of the audio channel to extract from the input video",
+        )
+        parser.add_argument(
             "-c",
             "--cache-dir",
             type=pathlib.Path,
@@ -37,6 +43,7 @@ class _InputCacheGroupBase[Resolved: InputCacheArgs](Group[Resolved]):
     def _resolve_input_and_cache(self, args: argparse.Namespace) -> InputCacheArgs:
         return InputCacheArgs(
             input_video=args.input_video,
+            input_channel=args.input_channel,
             cache_dir=args.cache_dir or args.input_video.parent,
         )
 

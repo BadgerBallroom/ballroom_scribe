@@ -37,6 +37,8 @@ class TestEventRecorder(unittest.TestCase):
                         round="Final",
                         announcement_quote="Next up on the floor bronze waltz",
                         announcement_start_seconds=12.345,
+                        speech_detected=True,
+                        event_detected=True,
                     ),
                     ballroom_scribe.models.Event(
                         level="Silver",
@@ -45,6 +47,8 @@ class TestEventRecorder(unittest.TestCase):
                         round="Final",
                         announcement_quote="Moving on to silver tango",
                         announcement_start_seconds=67.890,
+                        speech_detected=True,
+                        event_detected=True,
                     ),
                 ],
                 formatted_inpoints=["0:00:12.35", "0:01:07.89"],

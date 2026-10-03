@@ -53,14 +53,18 @@ _CTRANSLATE2_EXTRA_KWARGS = frozenset({"max_queued_batches", "flash_attention", 
 
 def _flatten_segments_to_words(
     segments: Iterable[faster_whisper.transcribe.Segment],
+    offset_seconds: float,
 ) -> Generator[ballroom_scribe.models.Word]:
     """Flattens Faster Whisper segments into a generator of `Word` objects.
 
     Args:
         segments: The segments that Faster Whisper transcribed with word-level timestamps.
+        offset_seconds: The start time of the transcribed audio, in seconds since the beginning of the original audio
+            file. Faster-Whisper reports timestamps relative to the audio it was given, so this is added to every
+            word's timestamps to make them relative to the original audio file instead.
 
     Yields:
-        The words in order.
+        The words in order, with timestamps relative to the beginning of the original audio file.
     """
     for segment in segments:
         if not segment.words:
@@ -69,8 +73,8 @@ def _flatten_segments_to_words(
         for word in segment.words:
             yield ballroom_scribe.models.Word(
                 word=word.word.strip(),
-                start=word.start,
-                end=word.end,
+                start=offset_seconds + word.start,
+                end=offset_seconds + word.end,
                 probability=word.probability,
             )
 
@@ -90,7 +94,7 @@ def _read_words_from_file(input_path: pathlib.Path) -> Iterable[ballroom_scribe.
 
 
 class SpeechTranscriber:
-    """Transcribes audio files into word-level timestamps using Faster Whisper."""
+    """Transcribes speech chunks into word-level timestamps using Faster Whisper."""
 
     def __init__(
         self,
@@ -118,36 +122,83 @@ class SpeechTranscriber:
         """Initializes the Faster Whisper model."""
         return faster_whisper.WhisperModel(**self._whisper_init_kwargs)
 
+    @property
+    def _whisper_sample_rate(self) -> int:
+        """The sample rate, in Hz, at which the Faster-Whisper model expects its input audio.
+
+        `WhisperModel.transcribe` assumes that a NumPy array is already at this sample rate. It is read from the model's
+        `preprocessor_config.json`, so accessing this property loads the model.
+        """
+        return self._whisper_model.feature_extractor.sampling_rate
+
     def transcribe(
-        self, input_audio: pathlib.Path, output_text: pathlib.Path
-    ) -> Generator[ballroom_scribe.models.Word]:
-        """Transcribes the speech in an audio file into word-level timestamps.
+        self,
+        music_valley: ballroom_scribe.models.MusicValley,
+        channel: int,
+        cache_dir: pathlib.Path,
+    ) -> ballroom_scribe.models.TranscriptChunk:
+        """Transcribes the speech in a music valley into word-level timestamps.
+
+        Each speech chunk in the music valley is transcribed separately, and its words are cached in a CSV file in
+        `cache_dir` so that re-running the pipeline does not transcribe the same audio twice.
 
         Args:
-            input_audio: The audio file to transcribe.
-            output_text: The path to the CSV file to save the words to.
+            music_valley: The music valley whose `speech_chunks` will be transcribed.
+            channel: The audio channel from which the speech chunks were loaded.
+            cache_dir: The directory in which transcriptions will be cached.
 
-        Yields:
-            The transcribed words in order.
+        Returns:
+            A transcript chunk spanning the whole music valley, containing the words of all of its speech chunks in
+            chronological order. Word timestamps are in seconds since the beginning of the original audio file.
         """
-        if output_text.exists():
-            print("Transcription already exists. Not transcribing again.")
-        else:
-            self._call_whisper(input_audio, output_text)
-
-        # Read the words back from the file.
-        yield from _read_words_from_file(output_text)
-
-    def _call_whisper(self, input_audio: pathlib.Path, output_text: pathlib.Path) -> None:
-        """Transcribes audio file with Faster Whisper and saves the words to a CSV file."""
-        segments, _ = self._whisper_model.transcribe(
-            str(input_audio),
-            beam_size=self._whisper_beam_size,
-            word_timestamps=True,
-            vad_filter=True,  # Use the Voice Activity Detection filter to remove non-speech segments.
-            condition_on_previous_text=False,  # Don't loop on past mistakes.
+        words = tuple(
+            word
+            for audio_chunk in music_valley.speech_chunks
+            for word in self._load_or_transcribe_chunk(audio_chunk=audio_chunk, channel=channel, cache_dir=cache_dir)
+        )
+        return ballroom_scribe.models.TranscriptChunk(
+            start_samples=music_valley.start_samples,
+            sample_rate=music_valley.sample_rate,
+            duration_samples=music_valley.duration_samples,
+            words=words,
         )
 
-        # Buffer the words directly to a file to avoid using more RAM than necessary for long videos.
-        with ballroom_scribe.utils.atomic_path(output_text) as partial_text:
-            _save_words_to_file(_flatten_segments_to_words(segments), partial_text)
+    def _load_or_transcribe_chunk(
+        self,
+        audio_chunk: ballroom_scribe.models.AudioChunk,
+        channel: int,
+        cache_dir: pathlib.Path,
+    ) -> Iterable[ballroom_scribe.models.Word]:
+        """Loads the words of one speech chunk from the cache, or transcribes the chunk if it is not cached.
+
+        Args:
+            audio_chunk: The speech chunk to transcribe.
+            channel: The audio channel from which `audio_chunk` was loaded.
+            cache_dir: The directory in which transcriptions will be cached.
+
+        Returns:
+            The transcribed words.
+        """
+        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}-{channel}.csv"
+        if cache_file.exists():
+            return _read_words_from_file(cache_file)
+
+        words = list(self._call_whisper(audio_chunk))
+        with ballroom_scribe.utils.atomic_path(cache_file) as partial_cache_file:
+            _save_words_to_file(words, partial_cache_file)
+        return words
+
+    def _call_whisper(
+        self,
+        audio_chunk: ballroom_scribe.models.AudioChunk,
+    ) -> Generator[ballroom_scribe.models.Word]:
+        """Transcribes one speech chunk with Faster Whisper."""
+        # `WhisperModel.transcribe` assumes that a NumPy array is already at the model's sample rate.
+        resampled_chunk = audio_chunk.resample(new_sample_rate=self._whisper_sample_rate)
+        segments, _ = self._whisper_model.transcribe(
+            resampled_chunk.data,
+            beam_size=self._whisper_beam_size,
+            word_timestamps=True,
+            condition_on_previous_text=False,  # Don't loop on past mistakes.
+        )
+        return _flatten_segments_to_words(segments, offset_seconds=audio_chunk.start_seconds)

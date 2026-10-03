@@ -4,26 +4,26 @@ import argparse
 from collections.abc import Iterable, Sequence
 from typing import Any, overload
 
+from .audio_classification_group import AudioClassificationArgs, AudioClassificationGroup
 from .group_abc import Group, GroupArgs
 from .input_output_cache_group import InputCacheArgs, InputCacheGroup, InputOutputCacheArgs, InputOutputCacheGroup
 from .language_processing_group import LanguageProcessingArgs, LanguageProcessingGroup
+from .music_valley_detection_group import MusicValleyDetectionArgs, MusicValleyDetectionGroup
 from .speech_transcription_group import SpeechTranscriptionArgs, SpeechTranscriptionGroup
-from .transcript_chunking_group import TranscriptChunkingArgs, TranscriptChunkingGroup
-from .vocal_isolation_group import VocalIsolationArgs, VocalIsolationGroup
 
 __all__ = [
+    "AudioClassificationArgs",
+    "AudioClassificationGroup",
     "InputCacheArgs",
     "InputCacheGroup",
     "InputOutputCacheArgs",
     "InputOutputCacheGroup",
     "LanguageProcessingArgs",
     "LanguageProcessingGroup",
+    "MusicValleyDetectionArgs",
+    "MusicValleyDetectionGroup",
     "SpeechTranscriptionArgs",
     "SpeechTranscriptionGroup",
-    "TranscriptChunkingArgs",
-    "TranscriptChunkingGroup",
-    "VocalIsolationArgs",
-    "VocalIsolationGroup",
     "parse_args",
 ]
 

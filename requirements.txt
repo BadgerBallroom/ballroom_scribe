@@ -6,9 +6,13 @@ torch==2.14.0+cu132
 nvidia-cublas-cu12==12.9.2.10
 nvidia-cudnn-cu12==9.26.0.51
 
-# Audio separation and transcription
-demucs==4.1.0
+# Audio classification and transcription
 faster-whisper==1.2.1
+librosa==1.0.0
+numpy==2.5.4
+panns-inference==0.1.1
+scipy==1.18.1
+soundfile==0.14.0
 
 # Local LLM interface
 ollama==0.6.2

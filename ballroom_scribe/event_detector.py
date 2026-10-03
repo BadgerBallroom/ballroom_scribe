@@ -166,11 +166,6 @@ class _ModelResponseMode(Enum):
     CONTENT = 2
 
 
-def _chunk_to_path_stem(chunk: ballroom_scribe.models.TranscriptChunk) -> str:
-    """Returns a string that can be used to name a file that corresponds to this chunk without a file extension."""
-    return f"{chunk.start_time:08.2f}-{chunk.end_time:08.2f}"
-
-
 def _strip_punctuation(s: str) -> str:
     """Removes punctuation from the given string."""
     return s.translate(str.maketrans("", "", string.punctuation))
@@ -211,6 +206,33 @@ def _dict_to_event(d: dict, words: Sequence[ballroom_scribe.models.Word]) -> bal
         round=str(d.get("round", "")),
         announcement_quote=quote,
         announcement_start_seconds=_align_quote(quote=quote, words=words),
+        speech_detected=True,
+        event_detected=True,
+    )
+
+
+def _make_placeholder_event(
+    chunk: ballroom_scribe.models.TranscriptChunk,
+    speech_detected: bool,
+) -> ballroom_scribe.models.Event:
+    """Creates an `Event` that marks a music valley in which no event announcement was detected.
+
+    Args:
+        chunk: The transcript chunk spanning the music valley.
+        speech_detected: Whether any words were transcribed in the music valley.
+
+    Returns:
+        An event with empty text fields whose timestamp is the midpoint of the music valley.
+    """
+    return ballroom_scribe.models.Event(
+        level="",
+        style="",
+        dance="",
+        round="",
+        announcement_quote="",
+        announcement_start_seconds=chunk.midpoint_seconds,
+        speech_detected=speech_detected,
+        event_detected=False,
     )
 
 
@@ -275,17 +297,27 @@ class EventDetector:
     ) -> Generator[ballroom_scribe.models.Event]:
         """Uses an LLM to extract information from a transcript.
 
+        Every chunk yields at least one event so that every music valley is represented in the output. Chunks without
+        any words are not sent to the LLM.
+
         Args:
-            chunks_of_words: The transcript to process, chunked by silence.
+            chunks_of_words: The transcript to process, with one chunk per music valley.
             cache_dir:
                 The directory in which the LLM response will be cached in a .json file. If the model supports thinking,
                 the thinking output will be stored in a .md file.
 
         Yields:
-            The events that were found in the transcript.
+            The events that were found in the transcript. For each chunk in which no words were transcribed or no
+            event was detected, a placeholder event at the midpoint of the chunk is yielded instead.
         """
         for chunk in chunks_of_words:
-            yield from self._process_chunk(chunk, cache_dir)
+            if not chunk:
+                # Don't ask the LLM about empty text.
+                yield _make_placeholder_event(chunk, speech_detected=False)
+            elif events := self._process_chunk(chunk, cache_dir):
+                yield from events
+            else:
+                yield _make_placeholder_event(chunk, speech_detected=True)
 
     def _process_chunk(
         self,
@@ -293,7 +325,7 @@ class EventDetector:
         cache_dir: pathlib.Path,
     ) -> list[ballroom_scribe.models.Event]:
         """Checks for a cached LLM response and if there isn't one, calls the LLM."""
-        path_stem = _chunk_to_path_stem(chunk)
+        path_stem = chunk.get_filename_stem()
         response_output = cache_dir / (path_stem + ".json")
 
         if response_output.exists():

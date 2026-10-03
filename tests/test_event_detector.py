@@ -44,7 +44,7 @@ class TestAlignQuote(unittest.TestCase):
             "event",
             "8.",
         ]
-        chunk = tests.helpers.transcript_chunk.Maker(start_time=20.0).make(words)
+        chunk = tests.helpers.transcript_chunk.Maker(start_samples=200).make(words)
         self.mock_find_closest_matching.return_value = 3
 
         quote = "We now welcome our gold dancers"
@@ -114,6 +114,8 @@ class TestParseResponse(unittest.TestCase):
                     round="Final",
                     announcement_quote=quote,
                     announcement_start_seconds=45.5,
+                    speech_detected=True,
+                    event_detected=True,
                 )
             ],
         )
@@ -145,6 +147,8 @@ class TestParseResponse(unittest.TestCase):
                     round="",
                     announcement_quote="",
                     announcement_start_seconds=25.0,
+                    speech_detected=True,
+                    event_detected=True,
                 )
             ],
         )
@@ -177,6 +181,8 @@ class TestParseResponse(unittest.TestCase):
                     round="2",
                     announcement_quote="False",
                     announcement_start_seconds=50.0,
+                    speech_detected=True,
+                    event_detected=True,
                 )
             ],
         )
@@ -223,6 +229,8 @@ class TestParseResponse(unittest.TestCase):
                     round="Final",
                     announcement_quote="First announcement.",
                     announcement_start_seconds=20.0,
+                    speech_detected=True,
+                    event_detected=True,
                 ),
                 ballroom_scribe.models.Event(
                     level="Silver",
@@ -231,6 +239,8 @@ class TestParseResponse(unittest.TestCase):
                     round="Semifinal",
                     announcement_quote="Second announcement.",
                     announcement_start_seconds=50.0,
+                    speech_detected=True,
+                    event_detected=True,
                 ),
                 ballroom_scribe.models.Event(
                     level="Gold",
@@ -239,8 +249,47 @@ class TestParseResponse(unittest.TestCase):
                     round="Final",
                     announcement_quote="Third announcement.",
                     announcement_start_seconds=80.0,
+                    speech_detected=True,
+                    event_detected=True,
                 ),
             ],
+        )
+
+
+class TestMakePlaceholderEvent(unittest.TestCase):
+    """Unit tests for the `_make_placeholder_event` function."""
+
+    @parameterized.expand(
+        [
+            param("speech_detected", speech_detected=True),
+            param("no_speech_detected", speech_detected=False),
+        ]
+    )
+    def test_makes_placeholder_event_at_chunk_midpoint(self, _, speech_detected):
+        chunk = ballroom_scribe.models.TranscriptChunk(
+            start_samples=100,
+            sample_rate=10,
+            duration_samples=100,
+            words=(),
+        )
+
+        event = ballroom_scribe.event_detector._make_placeholder_event(
+            chunk,
+            speech_detected=speech_detected,
+        )
+
+        self.assertEqual(
+            event,
+            ballroom_scribe.models.Event(
+                level="",
+                style="",
+                dance="",
+                round="",
+                announcement_quote="",
+                announcement_start_seconds=15.0,
+                speech_detected=speech_detected,
+                event_detected=False,
+            ),
         )
 
 
@@ -277,6 +326,14 @@ class TestEventDetectorDetect(unittest.TestCase):
             patch.object(
                 ballroom_scribe.EventDetector,
                 "_process_chunk",
+                autospec=True,
+            )
+        )
+        self.mock_make_placeholder_event = self.enterContext(
+            patch.object(
+                ballroom_scribe.event_detector,
+                "_make_placeholder_event",
+                autospec=True,
             )
         )
 
@@ -284,30 +341,35 @@ class TestEventDetectorDetect(unittest.TestCase):
         self.chunks = [
             transcript_chunk_maker.make(["Housekeeping", "rules."]),
             transcript_chunk_maker.make(["Gold", "Latin", "Cha", "Cha", "Final."]),
-            transcript_chunk_maker.make(["Please", "welcome", "the", "judges."]),
+            transcript_chunk_maker.make([]),
             transcript_chunk_maker.make(["Gold", "Latin", "Rumba", "Final."]),
         ]
 
-    def test_detect_yields_events(self):
-        events = [
-            ballroom_scribe.models.Event(
-                level="Gold",
-                style="Latin",
-                dance="Cha Cha",
-                round="Final",
-                announcement_quote="Gold Latin Cha Cha Final.",
-                announcement_start_seconds=10.0,
-            ),
-            ballroom_scribe.models.Event(
-                level="Gold",
-                style="Latin",
-                dance="Rumba",
-                round="Final",
-                announcement_quote="Gold Latin Rumba Final.",
-                announcement_start_seconds=30.0,
-            ),
-        ]
-        self.mock_process_chunk.side_effect = [events, [], [], []]
+    def test_detect_yields_at_least_one_event_per_chunk(self):
+        cha_cha_event = ballroom_scribe.models.Event(
+            level="Gold",
+            style="Latin",
+            dance="Cha Cha",
+            round="Final",
+            announcement_quote="Gold Latin Cha Cha Final.",
+            announcement_start_seconds=10.0,
+            speech_detected=True,
+            event_detected=True,
+        )
+        rumba_event = ballroom_scribe.models.Event(
+            level="Gold",
+            style="Latin",
+            dance="Rumba",
+            round="Final",
+            announcement_quote="Gold Latin Rumba Final.",
+            announcement_start_seconds=30.0,
+            speech_detected=True,
+            event_detected=True,
+        )
+        no_event_placeholder = MagicMock(spec=ballroom_scribe.models.Event)
+        no_speech_placeholder = MagicMock(spec=ballroom_scribe.models.Event)
+        self.mock_process_chunk.side_effect = [[], [cha_cha_event], [rumba_event]]
+        self.mock_make_placeholder_event.side_effect = [no_event_placeholder, no_speech_placeholder]
 
         detector = ballroom_scribe.EventDetector(
             ollama_model=_OLLAMA_MODEL,
@@ -315,8 +377,31 @@ class TestEventDetectorDetect(unittest.TestCase):
         )
         results = list(detector.detect(self.chunks, _CACHE_DIR))
 
-        self.mock_process_chunk.assert_has_calls([call(chunk, _CACHE_DIR) for chunk in self.chunks])
-        self.assertEqual(results, events)
+        # The empty chunk should not be sent to the LLM.
+        self.mock_process_chunk.assert_has_calls(
+            [
+                call(detector, self.chunks[0], _CACHE_DIR),
+                call(detector, self.chunks[1], _CACHE_DIR),
+                call(detector, self.chunks[3], _CACHE_DIR),
+            ]
+        )
+        self.assertEqual(self.mock_process_chunk.call_count, 3)
+        self.mock_make_placeholder_event.assert_has_calls(
+            [
+                call(self.chunks[0], speech_detected=True),
+                call(self.chunks[2], speech_detected=False),
+            ]
+        )
+        self.assertEqual(self.mock_make_placeholder_event.call_count, 2)
+        self.assertEqual(
+            results,
+            [
+                no_event_placeholder,
+                cha_cha_event,
+                no_speech_placeholder,
+                rumba_event,
+            ],
+        )
 
     def test_detect_empty_chunk_sequence_yields_nothing(self):
         detector = ballroom_scribe.EventDetector(
@@ -331,8 +416,13 @@ class TestEventDetectorProcessChunk(unittest.TestCase):
     """Unit tests for `EventDetector._process_chunk."""
 
     def setUp(self):
-        self.chunk = ballroom_scribe.models.TranscriptChunk(start_time=1234.56, end_time=6543.21, words=())
-        self.path_stem = "01234.56-06543.21"
+        self.chunk = ballroom_scribe.models.TranscriptChunk(
+            start_samples=100,
+            sample_rate=10,
+            duration_samples=10,
+            words=(),
+        )
+        self.path_stem = "0000000100-0000000110"
         self.event = ballroom_scribe.models.Event(
             level="Newcomer",
             style="Smooth",
@@ -340,6 +430,8 @@ class TestEventDetectorProcessChunk(unittest.TestCase):
             round="Final",
             announcement_quote="Let's welcome our newcomers",
             announcement_start_seconds=2345.67,
+            speech_detected=True,
+            event_detected=True,
         )
         self.response = "<fake JSON string>"
 
@@ -427,7 +519,7 @@ class TestEventDetectorInvokeModel(unittest.TestCase):
             ollama_model=_OLLAMA_MODEL,
             ollama_options=_OLLAMA_OPTIONS,
         )
-        self.chunk = tests.helpers.transcript_chunk.Maker(start_time=12.0).make(
+        self.chunk = tests.helpers.transcript_chunk.Maker(start_samples=120).make(
             [
                 "Competitors",
                 "on",

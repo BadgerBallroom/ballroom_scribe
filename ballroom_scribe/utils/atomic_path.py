@@ -16,8 +16,8 @@ def atomic_path(final_path: pathlib.Path) -> Generator[pathlib.Path]:
     `Audio.partial.wav`):
 
     *   It is in the same directory, so the final rename is atomic.
-    *   It has the same suffix, so tools that infer the file format from the extension (e.g., FFmpeg and
-        `demucs.audio.save_audio`) still work.
+    *   It has the same suffix, so tools that rely on the extension still work (e.g., FFmpeg infers the output format
+        from it, and `numpy.save` appends `.npy` if it is missing).
     *   It is deterministic, so a stale file left behind by a killed process is deleted on the next attempt instead of
         accumulating.
 

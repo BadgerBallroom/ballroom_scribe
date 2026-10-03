@@ -46,7 +46,7 @@ class TestAtomicPath(unittest.TestCase):
 
     @parameterized.expand(
         [
-            param("exception", error=RuntimeError("Demucs failed")),
+            param("exception", error=RuntimeError("PANN inference failed")),
             param("keyboard_interrupt", error=KeyboardInterrupt()),
         ]
     )
