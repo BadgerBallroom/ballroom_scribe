@@ -20,7 +20,7 @@ def run_pipeline():
             ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),
             ballroom_scribe.cli.arguments.LanguageProcessingGroup(),
         ),
-        description="Extract timestamps for ballroom competition events from a video file.",
+        description="Extract timestamps for ballroom competition events from one or more video files.",
     )
     pipeline = ballroom_scribe.TimestampPipeline(
         audio_classification_args=audio_classification_args,

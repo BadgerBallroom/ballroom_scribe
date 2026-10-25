@@ -23,15 +23,19 @@ class EventRecorder:
 
     def record(
         self,
-        input_video: pathlib.Path,
-        events: Iterable[ballroom_scribe.models.Event],
+        events: Iterable[tuple[pathlib.Path, ballroom_scribe.models.Event]],
         target: pathlib.Path,
     ) -> None:
-        """Writes events to a CSV file."""
+        """Writes events to a CSV file.
+
+        Args:
+            events: Pairs of the input video in which each event was detected and the event itself, in output order.
+            target: The path to the output CSV file, which is overwritten.
+        """
         with open(target, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(self.COLUMNS)
-            for event in events:
+            for input_video, event in events:
                 writer.writerow(
                     (
                         input_video,

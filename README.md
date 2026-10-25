@@ -6,12 +6,15 @@ of dance.
 
 ## Architecture
 
-The process is orchestrated by [timestamp_pipeline.py](ballroom_scribe/timestamp_pipeline.py) in distinct stages.
+The process is orchestrated by [timestamp_pipeline.py](ballroom_scribe/timestamp_pipeline.py) in distinct stages. When
+multiple videos are given, every input is validated up front and then every video passes through each stage before the
+next stage begins so that each model is loaded into VRAM only once per run (at the cost of holding the speech audio of
+all videos in RAM between the audio classification and speech transcription stages).
 
 ```mermaid
 flowchart TD
-    InputVideo["Input Video (.mp4)"]
-    AudioChannel["Audio Channel Selection"]
+    InputVideo["Input Videos (.mp4)"]
+    AudioChannel["Audio Channel Selection (per video)"]
 
     ExtractAudio["Audio Extractor (FFmpeg)"]
 
@@ -41,7 +44,7 @@ flowchart TD
     EventDetector -->|"Events"| EventRecorder
     EventRecorder -->|"CSV Rows"| OutputCSV["Output CSV (.csv)"]
 
-    CacheDir[("Cache Directory")]
+    CacheDir[("Cache Directory (per video)")]
     SpeechTranscriber <-->|"Speech (.csv)"| CacheDir
     AudioClassifier <-->|"Probabilities (.npy)"| CacheDir
     ExtractAudio <-->|"Mono Audio (.wav)"| CacheDir
@@ -136,10 +139,24 @@ Invoke-WebRequest -Uri "https://zenodo.org/record/3987831/files/Cnn14_DecisionLe
 Invoke the main script, [find_timestamps.py](find_timestamps.py), from a PowerShell terminal. The basic usage is:
 
 ```powershell
-python find_timestamps.py C:\path\to\video.mp4 {0 or 1} --output-csv 'C:\path\to\output.csv'
+python find_timestamps.py -i C:\path\to\video.mp4 {0 or 1} --output-csv 'C:\path\to\output.csv'
 ```
 
 `{0 or 1}` refers to the audio channel to use. 0 usually means left, and 1 usually means right.
+
+To process multiple videos into a single CSV file, repeat `-i` / `--input` for each video:
+
+```powershell
+python find_timestamps.py `
+    -i C:\path\to\part1.mp4 1 `
+    -i C:\path\to\part2.mp4 1 `
+    --output-csv 'C:\path\to\competition.csv'
+```
+
+`--output-csv` is optional for a single video (defaulting to the input video's path with a `.csv` extension) and
+required when two or more videos are specified. You can pass `-c` / `--cache-dir` immediately after any `-i` / `--input`
+to override the parent cache directory for that video; each input video must resolve to its own distinct cache
+directory.
 
 You can find more options with:
 
@@ -172,5 +189,5 @@ pip install streamlit
 Then, you can launch the tool:
 
 ```powershell
-streamlit run tune_pann_thresholds.py -- C:\path\to\video.mp4 {0 or 1}
+streamlit run tune_pann_thresholds.py -- -i C:\path\to\video.mp4 {0 or 1}
 ```

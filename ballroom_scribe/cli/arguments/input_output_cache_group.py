@@ -1,6 +1,9 @@
+"""Argument groups for input videos, their audio channels and cache directories, and the output CSV file."""
+
 import argparse
 import pathlib
-from typing import override
+from collections.abc import Sequence
+from typing import Any, override
 
 from .group_abc import Group, GroupArgs
 
@@ -11,67 +14,157 @@ class InputCacheArgs(GroupArgs):
     cache_dir: pathlib.Path
 
 
-class InputOutputCacheArgs(InputCacheArgs):
+class InputOutputCacheArgs(GroupArgs):
+    inputs: list[InputCacheArgs]
     output_csv: pathlib.Path
 
 
-class _InputCacheGroupBase[Resolved: InputCacheArgs](Group[Resolved]):
-    """Shared base class for input video and cache directory arguments."""
+class _CacheDirAction(argparse.Action):
+    """Attaches each `-c/--cache-dir` to the most recent `-i/--input`.
+
+    `argparse` invokes actions in command-line order, so when this action runs, `namespace.input` holds exactly the
+    `-i/--input` entries that preceded this `-c/--cache-dir`. The directory is stored under that entry's index in a
+    `dict[int, pathlib.Path]` so that videos without their own `-c/--cache-dir` can fall back to their default.
+    """
+
+    @override
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: str | Sequence[Any] | None,
+        option_string: str | None = None,
+    ) -> None:
+        inputs = getattr(namespace, "input", None)
+        if not inputs:
+            raise argparse.ArgumentError(self, "Must come after the -i/--input to which it applies")
+        index = len(inputs) - 1
+        cache_dirs = getattr(namespace, self.dest, None) or {}
+        if index in cache_dirs:
+            raise argparse.ArgumentError(self, f"Given more than once for {inputs[index][0]}")
+        cache_dirs[index] = values
+        setattr(namespace, self.dest, cache_dirs)
+
+
+def _parse_channel(input_action: argparse.Action | None, channel: str) -> int:
+    """Converts the `CHANNEL` half of `-i/--input VIDEO CHANNEL`, failing the same way `type=int` would."""
+    try:
+        return int(channel)
+    except ValueError:
+        raise argparse.ArgumentError(input_action, f"invalid int value: {channel!r}") from None
+
+
+class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
+    """Shared base class for the `-i/--input VIDEO CHANNEL` and `-c/--cache-dir` arguments."""
+
+    def __init__(self, max_inputs: int | None = None) -> None:
+        """Initializes the instance.
+
+        Args:
+            max_inputs: The maximum number of `-i/--input` videos to accept, or `None` for no limit.
+
+        Raises:
+            ValueError: If `max_inputs` is less than 1.
+        """
+        if max_inputs is not None and max_inputs < 1:
+            raise ValueError(f"max_inputs must be at least 1, got {max_inputs}")
+        self._max_inputs = max_inputs
+        self._input_action: argparse.Action | None = None
 
     @override
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
-        parser.add_argument(
-            "input_video",
-            type=pathlib.Path,
-            help="Path to input video file",
+        input_help = (
+            "Path to an input video file followed by the zero-based index of the audio channel to extract from it"
         )
-        parser.add_argument(
-            "input_channel",
-            type=int,
-            help="Zero-based index of the audio channel to extract from the input video",
+        if self._max_inputs is None:
+            input_help += " (repeat for each video)"
+        elif self._max_inputs > 1:
+            input_help += f" (repeat for up to {self._max_inputs} videos)"
+        self._input_action = parser.add_argument(
+            "-i",
+            "--input",
+            nargs=2,
+            metavar=("VIDEO", "CHANNEL"),
+            action="append",
+            required=True,
+            help=input_help,
         )
         parser.add_argument(
             "-c",
             "--cache-dir",
+            action=_CacheDirAction,
             type=pathlib.Path,
             help=(
-                "Parent directory for a directory for caching intermediate results (default: same parent directory as"
-                " input video, so the cache directory is in the same directory as the input video)"
+                "Parent directory for a directory for caching intermediate results of the preceding -i/--input"
+                " (default: same parent directory as that input video, so the cache directory is in the same directory"
+                " as the input video)"
             ),
         )
 
-    def _resolve_input_and_cache(self, args: argparse.Namespace) -> InputCacheArgs:
-        return InputCacheArgs(
-            input_video=args.input_video,
-            input_channel=args.input_channel,
-            cache_dir=args.cache_dir or args.input_video.parent,
-        )
+    def _resolve_inputs(self, args: argparse.Namespace) -> list[InputCacheArgs]:
+        if self._max_inputs is not None and len(args.input) > self._max_inputs:
+            raise argparse.ArgumentError(
+                self._input_action,
+                f"Expected at most {self._max_inputs} video(s), got {len(args.input)}",
+            )
+        cache_dirs: dict[int, pathlib.Path] = args.cache_dir or {}
+        inputs: list[InputCacheArgs] = []
+        for index, (video, channel) in enumerate(args.input):
+            input_video = pathlib.Path(video)
+            inputs.append(
+                InputCacheArgs(
+                    input_video=input_video,
+                    input_channel=_parse_channel(self._input_action, channel),
+                    cache_dir=cache_dirs.get(index, input_video.parent),
+                )
+            )
+        return inputs
 
 
 class InputCacheGroup(_InputCacheGroupBase[InputCacheArgs]):
-    """Group of arguments related to input video and cache directory."""
+    """Group of arguments for a single input video, its audio channel, and its cache directory."""
+
+    def __init__(self) -> None:
+        super().__init__(max_inputs=1)
 
     @override
     def resolve(self, args: argparse.Namespace) -> InputCacheArgs:
-        return self._resolve_input_and_cache(args)
+        # `-i/--input` is required and `max_inputs` is 1, so exactly one input is guaranteed here.
+        (video_input,) = self._resolve_inputs(args)
+        return video_input
 
 
 class InputOutputCacheGroup(_InputCacheGroupBase[InputOutputCacheArgs]):
-    """Group of arguments related to input video, cache directory, and output CSV file."""
+    """Group of arguments for one or more input videos, their audio channels and cache directories, and the output CSV."""
+
+    def __init__(self, max_inputs: int | None = None) -> None:
+        """Initializes the instance.
+
+        Args:
+            max_inputs: The maximum number of `-i/--input` videos to accept, or `None` for no limit.
+        """
+        super().__init__(max_inputs=max_inputs)
+        self._output_csv_action: argparse.Action | None = None
 
     @override
     def add_arguments(self, parser: argparse.ArgumentParser) -> None:
         super().add_arguments(parser)
-        parser.add_argument(
+        self._output_csv_action = parser.add_argument(
             "-o",
             "--output-csv",
             type=pathlib.Path,
-            help="Path to output CSV file (default: same as input video with .csv extension)",
+            help=(
+                "Path to output CSV file (default: same as input video with .csv extension; required when more than"
+                " one -i/--input is given)"
+            ),
         )
 
     @override
     def resolve(self, args: argparse.Namespace) -> InputOutputCacheArgs:
+        inputs = self._resolve_inputs(args)
+        if args.output_csv is None and len(inputs) > 1:
+            raise argparse.ArgumentError(self._output_csv_action, "Required when more than one -i/--input is given")
         return InputOutputCacheArgs(
-            **self._resolve_input_and_cache(args),
-            output_csv=args.output_csv or args.input_video.with_suffix(".csv"),
+            inputs=inputs,
+            output_csv=args.output_csv or inputs[0]["input_video"].with_suffix(".csv"),
         )

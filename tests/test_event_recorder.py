@@ -9,7 +9,8 @@ import ballroom_scribe
 import ballroom_scribe.models
 import ballroom_scribe.utils
 
-_FAKE_INPUT_VIDEO = pathlib.Path("fake_input.mp4")
+_FAKE_INPUT_VIDEO_A = pathlib.Path("fake_input_a.mp4")
+_FAKE_INPUT_VIDEO_B = pathlib.Path("fake_input_b.mp4")
 _FAKE_OUTPUT_CSV = pathlib.Path("fake_output.csv")
 
 
@@ -30,32 +31,52 @@ class TestEventRecorder(unittest.TestCase):
             param(
                 "with_events",
                 events=[
-                    ballroom_scribe.models.Event(
-                        level="Bronze",
-                        style="Standard",
-                        dance="Waltz",
-                        round="Final",
-                        announcement_quote="Next up on the floor bronze waltz",
-                        announcement_start_seconds=12.345,
-                        speech_detected=True,
-                        event_detected=True,
+                    (
+                        _FAKE_INPUT_VIDEO_A,
+                        ballroom_scribe.models.Event(
+                            level="Bronze",
+                            style="Standard",
+                            dance="Waltz",
+                            round="Final",
+                            announcement_quote="Next up on the floor bronze waltz",
+                            announcement_start_seconds=12.345,
+                            speech_detected=True,
+                            event_detected=True,
+                        ),
                     ),
-                    ballroom_scribe.models.Event(
-                        level="Silver",
-                        style="Smooth",
-                        dance="Tango",
-                        round="Final",
-                        announcement_quote="Moving on to silver tango",
-                        announcement_start_seconds=67.890,
-                        speech_detected=True,
-                        event_detected=True,
+                    (
+                        _FAKE_INPUT_VIDEO_A,
+                        ballroom_scribe.models.Event(
+                            level="Silver",
+                            style="Smooth",
+                            dance="Tango",
+                            round="Final",
+                            announcement_quote="Moving on to silver tango",
+                            announcement_start_seconds=67.890,
+                            speech_detected=True,
+                            event_detected=True,
+                        ),
+                    ),
+                    (
+                        _FAKE_INPUT_VIDEO_B,
+                        ballroom_scribe.models.Event(
+                            level="Gold",
+                            style="Latin",
+                            dance="Cha Cha",
+                            round="Semifinal",
+                            announcement_quote="Gold Latin Cha Cha semifinal",
+                            announcement_start_seconds=5.0,
+                            speech_detected=True,
+                            event_detected=True,
+                        ),
                     ),
                 ],
-                formatted_inpoints=["0:00:12.35", "0:01:07.89"],
+                formatted_inpoints=["0:00:12.35", "0:01:07.89", "0:00:05.00"],
                 expected_rows=[
                     ("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round"),
-                    (_FAKE_INPUT_VIDEO, 12.345, "0:00:12.35", "Bronze", "Standard", "Waltz", "Final"),
-                    (_FAKE_INPUT_VIDEO, 67.890, "0:01:07.89", "Silver", "Smooth", "Tango", "Final"),
+                    (_FAKE_INPUT_VIDEO_A, 12.345, "0:00:12.35", "Bronze", "Standard", "Waltz", "Final"),
+                    (_FAKE_INPUT_VIDEO_A, 67.890, "0:01:07.89", "Silver", "Smooth", "Tango", "Final"),
+                    (_FAKE_INPUT_VIDEO_B, 5.0, "0:00:05.00", "Gold", "Latin", "Cha Cha", "Semifinal"),
                 ],
             ),
             param(
@@ -72,13 +93,13 @@ class TestEventRecorder(unittest.TestCase):
         self.mock_format_duration.side_effect = formatted_inpoints
 
         recorder = ballroom_scribe.EventRecorder()
-        recorder.record(input_video=_FAKE_INPUT_VIDEO, events=events, target=_FAKE_OUTPUT_CSV)
+        recorder.record(events=events, target=_FAKE_OUTPUT_CSV)
 
         self.mock_open.assert_called_once_with(_FAKE_OUTPUT_CSV, "w", newline="", encoding="utf-8")
         self.mock_csv_writer.assert_called_once_with(self.mock_open())
         self.assertEqual(
             self.mock_format_duration.call_args_list,
-            [call(event.announcement_start_seconds) for event in events],
+            [call(event.announcement_start_seconds) for _, event in events],
         )
         self.assertEqual(
             self.mock_csv_writer.return_value.writerow.call_args_list,
