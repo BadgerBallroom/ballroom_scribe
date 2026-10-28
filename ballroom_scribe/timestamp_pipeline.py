@@ -22,6 +22,7 @@ class _Video:
         input_channel: The audio channel to extract from `input_video`.
         cache_dir: The path to the video's own cache directory. Inside it, there will be:
             - `Audio-Channel-*.wav`: the extracted audio from the input video
+            - `Waveform-Channel-*.npz`: min/max waveform peaks cached by the GUI editor
             - `*.npy`: audio classification inferences
             - `*.csv`: the transcribed words of each speech chunk
             - `*.json`: the detected events from the transcript

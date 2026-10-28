@@ -1,17 +1,5 @@
-from .audio_chunk import AudioChunk
-from .chunk_abc import Chunk
-from .event import Event
-from .music_valley import MusicValley
-from .run_length_encoding import RunLengthEncoding
-from .transcript_chunk import TranscriptChunk
-from .word import Word
+"""Shared domain models for Ballroom Scribe."""
 
-__all__ = [
-    "AudioChunk",
-    "Chunk",
-    "Event",
-    "MusicValley",
-    "RunLengthEncoding",
-    "TranscriptChunk",
-    "Word",
-]
+import lazy_loader
+
+__getattr__, __dir__, __all__ = lazy_loader.attach_stub(__name__, __file__)

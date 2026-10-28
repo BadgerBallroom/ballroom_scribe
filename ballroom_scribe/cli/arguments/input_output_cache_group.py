@@ -1,4 +1,4 @@
-"""Argument groups for input videos, their audio channels and cache directories, and the output CSV file."""
+"""Argument groups for input videos, their audio channels and cache directories, and CSV files."""
 
 import argparse
 import pathlib
@@ -17,6 +17,11 @@ class InputCacheArgs(GroupArgs):
 class InputOutputCacheArgs(GroupArgs):
     inputs: list[InputCacheArgs]
     output_csv: pathlib.Path
+
+
+class InputCsvCacheArgs(GroupArgs):
+    inputs: list[InputCacheArgs]
+    csv: pathlib.Path | None
 
 
 class _CacheDirAction(argparse.Action):
@@ -57,11 +62,12 @@ def _parse_channel(input_action: argparse.Action | None, channel: str) -> int:
 class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
     """Shared base class for the `-i/--input VIDEO CHANNEL` and `-c/--cache-dir` arguments."""
 
-    def __init__(self, max_inputs: int | None = None) -> None:
+    def __init__(self, max_inputs: int | None = None, *, required: bool = True) -> None:
         """Initializes the instance.
 
         Args:
             max_inputs: The maximum number of `-i/--input` videos to accept, or `None` for no limit.
+            required: Whether at least one `-i/--input` must be provided.
 
         Raises:
             ValueError: If `max_inputs` is less than 1.
@@ -69,6 +75,7 @@ class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
         if max_inputs is not None and max_inputs < 1:
             raise ValueError(f"max_inputs must be at least 1, got {max_inputs}")
         self._max_inputs = max_inputs
+        self._required = required
         self._input_action: argparse.Action | None = None
 
     @override
@@ -86,7 +93,7 @@ class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
             nargs=2,
             metavar=("VIDEO", "CHANNEL"),
             action="append",
-            required=True,
+            required=self._required,
             help=input_help,
         )
         parser.add_argument(
@@ -102,14 +109,15 @@ class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
         )
 
     def _resolve_inputs(self, args: argparse.Namespace) -> list[InputCacheArgs]:
-        if self._max_inputs is not None and len(args.input) > self._max_inputs:
+        raw_inputs = args.input or []
+        if self._max_inputs is not None and len(raw_inputs) > self._max_inputs:
             raise argparse.ArgumentError(
                 self._input_action,
-                f"Expected at most {self._max_inputs} video(s), got {len(args.input)}",
+                f"Expected at most {self._max_inputs} video(s), got {len(raw_inputs)}",
             )
         cache_dirs: dict[int, pathlib.Path] = args.cache_dir or {}
         inputs: list[InputCacheArgs] = []
-        for index, (video, channel) in enumerate(args.input):
+        for index, (video, channel) in enumerate(raw_inputs):
             input_video = pathlib.Path(video)
             inputs.append(
                 InputCacheArgs(
@@ -167,4 +175,34 @@ class InputOutputCacheGroup(_InputCacheGroupBase[InputOutputCacheArgs]):
         return InputOutputCacheArgs(
             inputs=inputs,
             output_csv=args.output_csv or inputs[0]["input_video"].with_suffix(".csv"),
+        )
+
+
+class InputCsvCacheGroup(_InputCacheGroupBase[InputCsvCacheArgs]):
+    """Group of arguments for optional input videos, their cache directories, and an optional events CSV file."""
+
+    def __init__(self, max_inputs: int | None = None) -> None:
+        """Initializes the instance.
+
+        Args:
+            max_inputs: The maximum number of `-i/--input` videos to accept, or `None` for no limit.
+        """
+        super().__init__(max_inputs=max_inputs, required=False)
+
+    @override
+    def add_arguments(self, parser: argparse.ArgumentParser) -> None:
+        parser.add_argument(
+            "csv",
+            nargs="?",
+            type=pathlib.Path,
+            metavar="EVENTS_CSV",
+            help="Optional path to an existing events CSV file to open",
+        )
+        super().add_arguments(parser)
+
+    @override
+    def resolve(self, args: argparse.Namespace) -> InputCsvCacheArgs:
+        return InputCsvCacheArgs(
+            inputs=self._resolve_inputs(args),
+            csv=args.csv,
         )

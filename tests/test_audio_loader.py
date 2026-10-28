@@ -48,19 +48,19 @@ class TestAudioLoader(unittest.TestCase):
         self.mock_soundfile = self.mock_soundfile_cls.return_value
         self.mock_soundfile.__enter__.return_value = self.mock_soundfile
 
-        self.enterContext(patch.object(ballroom_scribe.audio_loader.AudioLoader, "SAMPLE_RATE", new=_SAMPLE_RATE))
+        self.enterContext(patch.object(ballroom_scribe.AudioLoader, "SAMPLE_RATE", new=_SAMPLE_RATE))
         self.mock_soundfile.samplerate = _SAMPLE_RATE
         self.mock_soundfile.channels = 1
 
-        self.enterContext(patch.object(ballroom_scribe.audio_loader.AudioLoader, "DTYPE", new=_DTYPE))
+        self.enterContext(patch.object(ballroom_scribe.AudioLoader, "DTYPE", new=_DTYPE))
 
     def test_init_non_positive_chunk_length(self):
         with self.assertRaisesRegex(ValueError, "chunk_minutes must be positive, but got 0.0."):
-            ballroom_scribe.audio_loader.AudioLoader(chunk_minutes=0.0, chunk_overlap_seconds=1.0)
+            ballroom_scribe.AudioLoader(chunk_minutes=0.0, chunk_overlap_seconds=1.0)
 
     def test_init_negative_overlap(self):
         with self.assertRaisesRegex(ValueError, "chunk_overlap_seconds must be non-negative, but got -1.0."):
-            ballroom_scribe.audio_loader.AudioLoader(chunk_minutes=1.0, chunk_overlap_seconds=-1.0)
+            ballroom_scribe.AudioLoader(chunk_minutes=1.0, chunk_overlap_seconds=-1.0)
 
     @parameterized.expand(
         [
@@ -98,7 +98,7 @@ class TestAudioLoader(unittest.TestCase):
         self.mock_soundfile.frames = frames
         self.mock_soundfile.samplerate = samplerate
         self.mock_soundfile.channels = channels
-        audio_loader = ballroom_scribe.audio_loader.AudioLoader(chunk_minutes=1.0, chunk_overlap_seconds=1.0)
+        audio_loader = ballroom_scribe.AudioLoader(chunk_minutes=1.0, chunk_overlap_seconds=1.0)
 
         with self.assertRaisesRegex(ValueError, expected_regex):
             list(audio_loader.load(self.input_audio))
@@ -228,7 +228,7 @@ class TestAudioLoader(unittest.TestCase):
         self.mock_soundfile.frames = frames
         self.mock_soundfile.read.side_effect = FakeReadSideEffect(fake_reads)
 
-        audio_loader = ballroom_scribe.audio_loader.AudioLoader(
+        audio_loader = ballroom_scribe.AudioLoader(
             chunk_minutes=_MINUTES_PER_FIVE_SAMPLES,
             chunk_overlap_seconds=overlap_seconds,
         )

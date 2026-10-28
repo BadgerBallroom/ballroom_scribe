@@ -235,6 +235,21 @@ class TestParseArgs(unittest.TestCase):
                     ollama_options=ollama.Options(temperature=0.123),
                 ),
             ),
+            param(
+                "logging_defaults",
+                args=["-i", "path/to/input.mp4", "1"],
+                expected=ballroom_scribe.cli.arguments.LoggingArgs(verbose=False),
+            ),
+            param(
+                "logging_short_flag",
+                args=["-i", "path/to/input.mp4", "1", "-v"],
+                expected=ballroom_scribe.cli.arguments.LoggingArgs(verbose=True),
+            ),
+            param(
+                "logging_long_flag",
+                args=["-i", "path/to/input.mp4", "1", "--verbose"],
+                expected=ballroom_scribe.cli.arguments.LoggingArgs(verbose=True),
+            ),
         ]
     )
     def test_valid_arguments(self, _, args, expected):
@@ -245,6 +260,7 @@ class TestParseArgs(unittest.TestCase):
                 ballroom_scribe.cli.arguments.MusicValleyDetectionGroup(),
                 ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),
                 ballroom_scribe.cli.arguments.LanguageProcessingGroup(),
+                ballroom_scribe.cli.arguments.LoggingGroup(),
             ),
             args,
             exit_on_error=False,
@@ -278,6 +294,84 @@ class TestParseArgs(unittest.TestCase):
             (
                 ballroom_scribe.cli.arguments.InputCacheGroup(),
                 ballroom_scribe.cli.arguments.AudioClassificationGroup(),
+            ),
+            args,
+            exit_on_error=False,
+        )
+        self.assertIn(expected, parsed_args)
+
+    @parameterized.expand(
+        [
+            param(
+                "empty",
+                args=[],
+                expected=ballroom_scribe.cli.arguments.InputCsvCacheArgs(
+                    inputs=[],
+                    csv=None,
+                ),
+            ),
+            param(
+                "csv_only",
+                args=["path/to/events.csv"],
+                expected=ballroom_scribe.cli.arguments.InputCsvCacheArgs(
+                    inputs=[],
+                    csv=pathlib.Path("path/to/events.csv"),
+                ),
+            ),
+            param(
+                "videos_only_with_per_input_cache_dir",
+                args=[
+                    "-i",
+                    "path/to/a.mp4",
+                    "0",
+                    "-c",
+                    "cache_a",
+                    "-i",
+                    "other/b.mp4",
+                    "1",
+                ],
+                expected=ballroom_scribe.cli.arguments.InputCsvCacheArgs(
+                    inputs=[
+                        ballroom_scribe.cli.arguments.InputCacheArgs(
+                            input_video=pathlib.Path("path/to/a.mp4"),
+                            input_channel=0,
+                            cache_dir=pathlib.Path("cache_a"),
+                        ),
+                        ballroom_scribe.cli.arguments.InputCacheArgs(
+                            input_video=pathlib.Path("other/b.mp4"),
+                            input_channel=1,
+                            cache_dir=pathlib.Path("other"),
+                        ),
+                    ],
+                    csv=None,
+                ),
+            ),
+            param(
+                "csv_and_video",
+                args=[
+                    "path/to/events.csv",
+                    "-i",
+                    "path/to/c.mp4",
+                    "0",
+                ],
+                expected=ballroom_scribe.cli.arguments.InputCsvCacheArgs(
+                    inputs=[
+                        ballroom_scribe.cli.arguments.InputCacheArgs(
+                            input_video=pathlib.Path("path/to/c.mp4"),
+                            input_channel=0,
+                            cache_dir=pathlib.Path("path/to"),
+                        ),
+                    ],
+                    csv=pathlib.Path("path/to/events.csv"),
+                ),
+            ),
+        ]
+    )
+    def test_valid_input_csv_cache_arguments(self, _, args, expected):
+        parsed_args = ballroom_scribe.cli.arguments.parse_args(
+            (
+                ballroom_scribe.cli.arguments.InputCsvCacheGroup(),
+                ballroom_scribe.cli.arguments.LoggingGroup(),
             ),
             args,
             exit_on_error=False,
@@ -408,6 +502,7 @@ class TestParseArgs(unittest.TestCase):
                     ballroom_scribe.cli.arguments.MusicValleyDetectionGroup(),
                     ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),
                     ballroom_scribe.cli.arguments.LanguageProcessingGroup(),
+                    ballroom_scribe.cli.arguments.LoggingGroup(),
                 ),
                 args,
                 exit_on_error=False,
