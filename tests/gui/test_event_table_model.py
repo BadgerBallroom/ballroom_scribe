@@ -68,7 +68,7 @@ class TestEventTableModel(unittest.TestCase):
         self.assertFalse(
             bool(self.model.flags(self.model.index(0, col.INPOINT_FORMATTED)) & QtCore.Qt.ItemFlag.ItemIsEditable)
         )
-        for editable_col in (col.INPOINT, col.LEVEL, col.STYLE, col.DANCE, col.ROUND):
+        for editable_col in (col.INPOINT, col.LEVEL, col.STYLE, col.DANCE, col.ROUND, col.COMMENT):
             self.assertTrue(
                 bool(self.model.flags(self.model.index(0, editable_col)) & QtCore.Qt.ItemFlag.ItemIsEditable)
             )
@@ -183,6 +183,7 @@ class TestEventTableModel(unittest.TestCase):
             param("style", column=ballroom_scribe.gui.EventTableModel.Column.STYLE, field="style"),
             param("dance", column=ballroom_scribe.gui.EventTableModel.Column.DANCE, field="dance"),
             param("round", column=ballroom_scribe.gui.EventTableModel.Column.ROUND, field="round"),
+            param("comment", column=ballroom_scribe.gui.EventTableModel.Column.COMMENT, field="comment"),
         ]
     )
     def test_set_data_edits_each_text_column(self, _, column, field: str):
@@ -190,6 +191,17 @@ class TestEventTableModel(unittest.TestCase):
 
         self.assertEqual(getattr(self.model.record_at(2), field), "New Value")
         self.assertEqual(self.model.undo_stack.undoText(), f"Edit {ballroom_scribe.EventRecorder.COLUMNS[column]}")
+
+    def test_set_data_keeps_comment_line_breaks_but_normalizes_their_endings(self):
+        col = ballroom_scribe.gui.EventTableModel.Column
+        index = self.model.index(0, col.COMMENT)
+
+        self.assertTrue(self.model.setData(index, " Check music\r\nbefore heat 2\r "))
+
+        self.assertEqual(self.model.record_at(0).comment, "Check music\nbefore heat 2")
+        self.assertEqual(self.model.data(index, QtCore.Qt.ItemDataRole.EditRole), "Check music\nbefore heat 2")
+        self.assertEqual(self.model.data(index), "Check music …")
+        self.assertEqual(self.model.data(index, QtCore.Qt.ItemDataRole.ToolTipRole), "Check music\nbefore heat 2")
 
 
 class TestFill(unittest.TestCase):
@@ -211,6 +223,7 @@ class TestFill(unittest.TestCase):
             param("style_as_int", column=4, expected=True),
             param("dance", column=ballroom_scribe.gui.EventTableModel.Column.DANCE, expected=True),
             param("round", column=ballroom_scribe.gui.EventTableModel.Column.ROUND, expected=True),
+            param("comment", column=ballroom_scribe.gui.EventTableModel.Column.COMMENT, expected=False),
         ]
     )
     def test_is_fillable(self, _, column, expected: bool):
@@ -280,6 +293,7 @@ class TestFill(unittest.TestCase):
             param("file", column=ballroom_scribe.gui.EventTableModel.Column.FILE),
             param("inpoint", column=ballroom_scribe.gui.EventTableModel.Column.INPOINT),
             param("inpoint_formatted", column=ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED),
+            param("comment", column=ballroom_scribe.gui.EventTableModel.Column.COMMENT),
         ]
     )
     def test_fill_rejects_columns_without_a_handle(self, _, column):
@@ -519,6 +533,18 @@ class TestClearCell(unittest.TestCase):
         self.assertEqual(self.model.undo_stack.count(), 0)
         self.assertTrue(self.model.undo_stack.isClean())
 
+    def test_clears_comment_as_its_own_undo_step(self):
+        index = self.model.index(1, self.col.COMMENT)
+        self.assertFalse(self.model.clear_cell(index))  # Nothing to clear yet.
+        self.assertTrue(self.model.setData(index, "Re-check the dance\nagainst the heat list"))
+
+        self.assertTrue(self.model.clear_cell(index))
+        self.assertEqual(self.model.record_at(1).comment, "")
+        self.assertEqual(self.model.undo_stack.undoText(), "Clear Comment")
+
+        self.model.undo_stack.undo()
+        self.assertEqual(self.model.record_at(1).comment, "Re-check the dance\nagainst the heat list")
+
     @parameterized.expand(
         [
             param("file", column=ballroom_scribe.gui.EventTableModel.Column.FILE),
@@ -750,6 +776,82 @@ class TestRowEntered(unittest.TestCase):
         self.assertIsNone(self.model.row_entered(pathlib.Path("/videos/missing.mp4"), 0.0, 999.0))
 
 
+class TestCommentDisplay(unittest.TestCase):
+    """Unit tests for `EventTableModel.set_comment_display` and the `Comment` column's roles."""
+
+    def setUp(self):
+        self.model = ballroom_scribe.gui.EventTableModel()
+        self.model.set_records(_make_sample_records())
+        self.col = ballroom_scribe.gui.EventTableModel.Column
+        self.display = ballroom_scribe.gui.EventTableModel.CommentDisplay
+        self.model.setData(self.model.index(0, self.col.COMMENT), "Check music\nbefore heat 2")
+        self.model.undo_stack.clear()
+        self.annotated = self.model.index(0, self.col.COMMENT)
+        self.blank = self.model.index(1, self.col.COMMENT)
+
+    def test_defaults_to_text_showing_the_first_line(self):
+        decoration = QtCore.Qt.ItemDataRole.DecorationRole
+        self.assertEqual(self.model.comment_display, self.display.TEXT)
+        self.assertEqual(self.model.data(self.annotated), "Check music …")
+        self.assertEqual(self.model.data(self.blank), "")
+        self.assertIsNone(self.model.data(self.annotated, decoration))
+        self.assertIsNone(self.model.data(self.blank, QtCore.Qt.ItemDataRole.ToolTipRole))
+        self.assertEqual(self.model.headerData(self.col.COMMENT, QtCore.Qt.Orientation.Horizontal), "Comment")
+        self.assertIsNone(self.model.headerData(self.col.COMMENT, QtCore.Qt.Orientation.Horizontal, decoration))
+
+    def test_icon_mode_swaps_text_for_presence_icons_and_keeps_the_comment_available(self):
+        decoration = QtCore.Qt.ItemDataRole.DecorationRole
+        tooltip = QtCore.Qt.ItemDataRole.ToolTipRole
+        horizontal = QtCore.Qt.Orientation.Horizontal
+
+        self.model.set_comment_display(self.display.ICON)
+
+        self.assertEqual(self.model.comment_display, self.display.ICON)
+        self.assertEqual(self.model.data(self.annotated), "")
+        self.assertEqual(self.model.data(self.annotated, decoration).name(), "comment-present")
+        self.assertEqual(self.model.data(self.blank, decoration).name(), "comment-empty")
+        self.assertEqual(self.model.data(self.annotated, QtCore.Qt.ItemDataRole.EditRole), "Check music\nbefore heat 2")
+        self.assertEqual(self.model.data(self.annotated, tooltip), "Check music\nbefore heat 2")
+        self.assertEqual(self.model.data(self.blank, tooltip), "Click to add a comment")
+        self.assertEqual(self.model.headerData(self.col.COMMENT, horizontal), "")
+        self.assertEqual(self.model.headerData(self.col.COMMENT, horizontal, decoration).name(), "comment-empty")
+        self.assertEqual(self.model.headerData(self.col.COMMENT, horizontal, tooltip), "Comment")
+        # The other columns are untouched.
+        self.assertEqual(self.model.headerData(self.col.ROUND, horizontal), "Round")
+        self.assertIsNone(self.model.data(self.model.index(0, self.col.ROUND), decoration))
+
+    def test_switching_notifies_the_comment_column_once_and_is_idempotent(self):
+        data_changes: list[tuple[int, int, int, int]] = []
+        header_changes: list[tuple[int, int]] = []
+        self.model.dataChanged.connect(
+            lambda top_left, bottom_right, _roles=(): data_changes.append(
+                (top_left.row(), top_left.column(), bottom_right.row(), bottom_right.column())
+            )
+        )
+        self.model.headerDataChanged.connect(lambda _orientation, first, last: header_changes.append((first, last)))
+
+        self.model.set_comment_display(self.display.ICON)
+        self.model.set_comment_display(self.display.ICON)
+
+        comment = int(self.col.COMMENT)
+        self.assertEqual(data_changes, [(0, comment, 2, comment)])
+        self.assertEqual(header_changes, [(comment, comment)])
+
+        self.model.set_comment_display(self.display.TEXT)
+        self.assertEqual(len(data_changes), 2)
+        self.assertEqual(self.model.data(self.annotated), "Check music …")
+
+    def test_switching_an_empty_table_only_updates_the_header(self):
+        empty = ballroom_scribe.gui.EventTableModel()
+        data_changes: list[object] = []
+        empty.dataChanged.connect(lambda *args: data_changes.append(args))
+
+        empty.set_comment_display(self.display.ICON)
+
+        self.assertEqual(data_changes, [])
+        self.assertEqual(empty.headerData(self.col.COMMENT, QtCore.Qt.Orientation.Horizontal), "")
+
+
 def _make_search_records() -> list[ballroom_scribe.models.EventRecord]:
     return [
         ballroom_scribe.models.EventRecord(
@@ -872,6 +974,19 @@ class TestFindMatches(unittest.TestCase):
     )
     def test_find_matches_variants(self, _, query: str, kwargs: dict, expected: list):
         self.assertEqual(self.model.find_matches(query, **kwargs), tuple(expected))
+
+    def test_searches_comments_by_default_and_when_asked_for_that_column(self):
+        col = ballroom_scribe.gui.EventTableModel.Column
+        self.assertTrue(self.model.setData(self.model.index(3, col.COMMENT), "Waltz music\ncut short"))
+
+        self.assertEqual(self.model.find_matches("waltz"), ((0, col.DANCE), (3, col.COMMENT)))
+        self.assertEqual(self.model.find_matches("cut short", columns=(col.COMMENT,)), ((3, col.COMMENT),))
+        self.assertEqual(
+            self.model.find_matches("waltz", columns=ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS),
+            ((0, col.DANCE),),
+        )
+        self.assertEqual(self.model.replace_all("cut short", "faded early", columns=(col.COMMENT,)), 1)
+        self.assertEqual(self.model.record_at(3).comment, "Waltz music\nfaded early")
 
     @parameterized.expand(
         [

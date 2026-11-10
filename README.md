@@ -74,7 +74,9 @@ flowchart TD
     starting timestamps of the emcee's announcements.
     *   Ollama handles freeing VRAM.
 6.  **Event Recording** ([event_recorder.py](ballroom_scribe/event_recorder.py)): Reads and writes event details in CSV
-    format with the columns `File`, `Inpoint`, `Inpoint Formatted`, `Level`, `Style`, `Dance`, and `Round`.
+    format with the columns `File`, `Inpoint`, `Inpoint Formatted`, `Level`, `Style`, `Dance`, `Round`, and
+    `Comment`. `Comment` holds free-text notes typed in the editor (the pipeline leaves it empty and never reads it);
+    CSVs written before it existed still open, with empty comments.
 
 Each stage that writes to the cache directory skips its work if its output file already exists, so rerunning an
 interrupted run resumes where it left off. To make this safe, cache files are written atomically
@@ -215,6 +217,7 @@ including Qt multimedia backend diagnostics, to the console.
     *   **Add Event** (<kbd>Ctrl</kbd> + <kbd>E</kbd>) inserts a row for the active video at the playhead and opens it
         for editing.
     *   **Delete Event** (<kbd>Ctrl</kbd> + <kbd>D</kbd>) deletes all selected rows
+*   **Comments**: The Comment column holds free-text notes for people reading the CSV.
 
 ### Keyboard Shortcuts
 

@@ -140,8 +140,8 @@ class AutocompleteDelegate(CurrentCellDelegate):
     """Creates a line edit that drops down the other rows' values in the same column and filters them as you type.
 
     Picking a value with the mouse moves editing to the next cell so a row can be filled in with successive clicks;
-    in the last column it just commits. Cells are painted by `CurrentCellDelegate`, so the current cell stays
-    recognizable while the table has keyboard focus.
+    in `Round`, the last column with suggestions, it just commits rather than opening the comment editor. Cells are
+    painted by `CurrentCellDelegate`, so the current cell stays recognizable while the table has keyboard focus.
     """
 
     @override
@@ -156,6 +156,8 @@ class AutocompleteDelegate(CurrentCellDelegate):
         if isinstance(model, ballroom_scribe.gui.EventTableModel):
             suggestions = model.unique_values(index.column(), exclude_row=index.row())
             if suggestions:
-                is_last_column = index.column() == model.columnCount() - 1
-                return _CompletingLineEdit(suggestions, advance_on_pick=not is_last_column, parent=parent)
+                last_suggesting_column = int(max(ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS))
+                return _CompletingLineEdit(
+                    suggestions, advance_on_pick=index.column() != last_suggesting_column, parent=parent
+                )
         return QtWidgets.QLineEdit(parent)

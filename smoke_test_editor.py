@@ -2107,12 +2107,17 @@ def _check_find_and_replace(fixture: _Fixture) -> None:
         abs(player.position_seconds() - 1.5) < 1e-3,
         f"First Find Next moved playhead to {player.position_seconds():.3f} s, expected 1.5 s",
     )
-    color_group = QtGui.QPalette.ColorGroup.Active if window.isActiveWindow() else QtGui.QPalette.ColorGroup.Inactive
-    highlight = view.palette().color(color_group, QtGui.QPalette.ColorRole.Highlight)
+    # The frame uses the selection colour of whichever palette group the view paints with; in a real window on macOS
+    # the activation state can change behind the test's back, so accept the active and inactive colours alike.
+    highlights = [
+        view.palette().color(group, QtGui.QPalette.ColorRole.Highlight)
+        for group in (QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorGroup.Inactive)
+    ]
     active_sample = _sample_cell(view, view.viewport().grab().toImage(), model.index(0, int(col.LEVEL)))
     _expect(
-        _colors_match(active_sample.edge, highlight),
-        f"Active search match edge {active_sample.edge.name()} was not framed with {highlight.name()}",
+        any(_colors_match(active_sample.edge, highlight) for highlight in highlights),
+        f"Active search match edge {active_sample.edge.name()} was not framed with"
+        f" {' or '.join(highlight.name() for highlight in highlights)}",
     )
 
     QtTest.QTest.keyClick(bar.find_edit, key.Key_Return)
@@ -2310,9 +2315,138 @@ def _check_close_during_extraction(fixture: _Fixture) -> None:
     )
 
 
+def _check_comment_column(fixture: _Fixture) -> None:
+    """Comments show as icons in a narrow table and as text in a wide one, edited in an overlay either way."""
+    window = fixture.window
+    view = window.table_view
+    viewport = view.viewport()
+    model = window.table_model
+    bar = window.find_replace_bar
+    col = ballroom_scribe.gui.EventTableModel.Column
+    display = ballroom_scribe.gui.EventTableModel.CommentDisplay
+    header = view.horizontalHeader()
+    left = QtCore.Qt.MouseButton.LeftButton
+    editing = QtWidgets.QAbstractItemView.State.EditingState
+    decoration = QtCore.Qt.ItemDataRole.DecorationRole
+    comment_index = model.index(0, int(col.COMMENT))
+    comment_text = "Check music\nbefore heat 2"
+
+    root_splitter = window.centralWidget()
+    assert isinstance(root_splitter, QtWidgets.QSplitter)
+    content_splitter = root_splitter.widget(0)
+    assert isinstance(content_splitter, QtWidgets.QSplitter)
+    original_sizes = content_splitter.sizes()
+
+    def set_table_width(width: int) -> None:
+        """Gives the table pane `width` pixels of the video/table splitter, letting the column layout settle."""
+        content_splitter.setSizes([content_splitter.width() - width, width])
+        _settle(fixture.app, 0.1)
+
+    def comment_editor() -> QtWidgets.QPlainTextEdit:
+        editor = _open_cell_editor(fixture)
+        _expect(
+            isinstance(editor, QtWidgets.QPlainTextEdit) and view.currentIndex() == comment_index,
+            f"Comment editor is {type(editor).__name__} on {view.currentIndex().column()}, expected a plain text"
+            " editor on the Comment cell",
+        )
+        assert isinstance(editor, QtWidgets.QPlainTextEdit)
+        return editor
+
+    try:
+        # 1. A narrow table shows presence icons in a fixed narrow column with an icon for a header.
+        set_table_width(400)
+        _expect(model.comment_display == display.ICON, f"Comment display is {model.comment_display} in a 400 px table")
+        _expect(header.sectionSize(int(col.COMMENT)) <= 32, f"Icon column is {header.sectionSize(int(col.COMMENT))} px")
+        _expect(
+            model.data(comment_index) == "" and model.data(comment_index, decoration).name() == "comment-empty",
+            "An empty comment cell in icon mode did not show the empty icon",
+        )
+        _expect(
+            model.headerData(int(col.COMMENT), QtCore.Qt.Orientation.Horizontal) == ""
+            and model.headerData(int(col.COMMENT), QtCore.Qt.Orientation.Horizontal, decoration).name()
+            == "comment-empty",
+            "The Comment header did not switch to an icon",
+        )
+
+        # 2. Clicking the icon opens an overlay editor wider than the cell and inside the viewport; Enter commits and
+        # Shift+Enter starts a new line.
+        view.setCurrentIndex(model.index(0, 0))
+        fixture.app.processEvents()
+        cell_rect = view.visualRect(comment_index)
+        QtTest.QTest.mouseClick(viewport, left, pos=cell_rect.center())
+        fixture.app.processEvents()
+        editor = comment_editor()
+        geometry = editor.geometry()
+        _expect(
+            geometry.width() >= 280 and geometry.width() > cell_rect.width() and viewport.rect().contains(geometry),
+            f"Comment editor geometry {geometry} is not an overlay inside the viewport {viewport.rect()}",
+        )
+        QtTest.QTest.keyClicks(editor, "Check music")
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Return, QtCore.Qt.KeyboardModifier.ShiftModifier)
+        QtTest.QTest.keyClicks(editor, "before heat 2")
+        _expect(view.state() == editing, "Shift+Enter closed the comment editor instead of adding a line")
+        QtTest.QTest.keyClick(editor, QtCore.Qt.Key.Key_Return)
+        fixture.app.processEvents()
+        _expect(
+            view.state() != editing and model.record_at(0).comment == comment_text,
+            f"Enter did not commit the comment: state {view.state().name}, comment {model.record_at(0).comment!r}",
+        )
+        _expect(model.undo_stack.undoText() == "Edit Comment", f"Undo text is {model.undo_stack.undoText()!r}")
+        _expect(
+            model.data(comment_index, decoration).name() == "comment-present"
+            and model.data(comment_index, QtCore.Qt.ItemDataRole.ToolTipRole) == comment_text,
+            "A filled comment cell in icon mode did not show the present icon with the comment as its tooltip",
+        )
+
+        # 3. Esc discards an edit.
+        QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(comment_index).center())
+        fixture.app.processEvents()
+        editor = comment_editor()
+        QtTest.QTest.keyClicks(editor, "discarded")
+        _cancel_cell_editor(fixture)
+        _expect(
+            view.state() != editing and model.record_at(0).comment == comment_text,
+            "Esc did not discard the comment edit",
+        )
+
+        # 4. A wide table shows the first line of the comment, with an ellipsis for the rest, in a text column that
+        # starts at least 160 px wide; double-clicking it opens the same overlay with the whole comment.
+        set_table_width(1000)
+        _expect(model.comment_display == display.TEXT, f"Comment display is {model.comment_display} in a 1000 px table")
+        _expect(
+            header.sectionSize(int(col.COMMENT)) >= 160, f"Text column is {header.sectionSize(int(col.COMMENT))} px"
+        )
+        _expect(model.data(comment_index) == "Check music …", f"Comment cell shows {model.data(comment_index)!r}")
+        QtTest.QTest.mouseDClick(viewport, left, pos=view.visualRect(comment_index).center())
+        fixture.app.processEvents()
+        editor = comment_editor()
+        _expect(editor.toPlainText() == comment_text, f"Overlay opened with {editor.toPlainText()!r}")
+        _cancel_cell_editor(fixture)
+
+        # 5. Find covers comments and offers the column; Delete clears the cell as one undo step.
+        _expect(
+            model.find_matches("heat 2") == ((0, col.COMMENT),), f"find_matches found {model.find_matches('heat 2')}"
+        )
+        combo_items = [bar.column_combo.itemText(i) for i in range(bar.column_combo.count())]
+        _expect("Comment" in combo_items, f"Find's column drop-down lists {combo_items}")
+        view.setCurrentIndex(comment_index)
+        if _focus_table(fixture):
+            _press(fixture, QtCore.Qt.Key.Key_Delete)
+            _expect(
+                model.record_at(0).comment == "" and model.undo_stack.undoText() == "Clear Comment",
+                f"Delete left comment {model.record_at(0).comment!r} with undo text {model.undo_stack.undoText()!r}",
+            )
+            model.undo_stack.undo()
+            _expect(model.record_at(0).comment == comment_text, "Undo did not restore the cleared comment")
+    finally:
+        content_splitter.setSizes(original_sizes)
+        _settle(fixture.app, 0.1)
+
+
 def _check_save_round_trip(fixture: _Fixture) -> None:
     window = fixture.window
     saved_csv = fixture.work_dir / "saved_events.csv"
+    _expect(any(record.comment for record in window.table_model.records), "No comment left to round-trip")
     _expect(window.save_csv(saved_csv), "save_csv failed")
     _expect(window.table_model.undo_stack.isClean(), "Saving did not mark the document clean")
     reloaded = list(ballroom_scribe.EventRecorder().read(saved_csv))
@@ -2354,6 +2488,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Select several rows, delete them, and keep Set Inpoint to one row", _check_multi_row_selection),
         ("Go to Event and move between rows with Alt", _check_go_to_event_and_alt_navigation),
         ("Find and replace across rows and columns", _check_find_and_replace),
+        ("Edit comments as icons and as text", _check_comment_column),
         ("Save CSV and reload it", _check_save_round_trip),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),

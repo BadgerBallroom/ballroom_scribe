@@ -20,6 +20,7 @@ class EventRecord:
         style: The category of the dance, such as smooth, standard, rhythm, or Latin.
         dance: The dance itself, such as waltz, quickstep, rumba, or jive.
         round: The competition round, such as quarterfinal, semifinal, or final.
+        comment: Free-text annotation for human readers, possibly spanning several lines; never used by the pipeline.
     """
 
     file: pathlib.Path
@@ -28,6 +29,7 @@ class EventRecord:
     style: str
     dance: str
     round: str
+    comment: str = ""
 
     @property
     def inpoint_formatted(self) -> str:

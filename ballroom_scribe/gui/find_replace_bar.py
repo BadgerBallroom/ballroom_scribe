@@ -91,7 +91,7 @@ class FindReplaceBar(QtWidgets.QWidget):
 
         self._column_combo = QtWidgets.QComboBox(self)
         self._column_combo.addItem("All Text Columns", None)
-        for column in ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS:
+        for column in ballroom_scribe.gui.EventTableModel.SEARCHABLE_COLUMNS:
             self._column_combo.addItem(ballroom_scribe.EventRecorder.COLUMNS[int(column)], column)
         self._column_combo.currentIndexChanged.connect(self._on_search_criteria_changed)
 
@@ -495,7 +495,7 @@ class FindReplaceBar(QtWidgets.QWidget):
         selected = self.selected_column
         if selected is not None:
             return (selected,)
-        return ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS
+        return ballroom_scribe.gui.EventTableModel.SEARCHABLE_COLUMNS
 
     def _target_rows(self) -> tuple[int, ...] | None:
         if self.selected_rows_only:

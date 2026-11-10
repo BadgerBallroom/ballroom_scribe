@@ -124,6 +124,8 @@ def _column_text_value(record: ballroom_scribe.models.EventRecord, column: Event
             return record.dance
         case EventTableModel.Column.ROUND:
             return record.round
+        case EventTableModel.Column.COMMENT:
+            return record.comment
 
 
 def _with_text_value(
@@ -145,8 +147,18 @@ def _with_text_value(
             return dataclasses.replace(record, dance=text)
         case EventTableModel.Column.ROUND:
             return dataclasses.replace(record, round=text)
+        case EventTableModel.Column.COMMENT:
+            return dataclasses.replace(record, comment=text)
         case _:
             raise ValueError(f"Column {column.name} has no free-text value.")
+
+
+def _comment_summary(comment: str) -> str:
+    """Returns the first line of `comment`, marking further lines with an ellipsis, for a single-line cell."""
+    lines = comment.splitlines()
+    if not lines:
+        return ""
+    return f"{lines[0]} …" if len(lines) > 1 else lines[0]
 
 
 def _rows_between(first: int, last: int) -> range:
@@ -190,6 +202,10 @@ class EventTableModel(QtCore.QAbstractTableModel):
     edit that changes a row's `File` or `Inpoint` (`set_inpoint`, or committing a typed inpoint through
     `setData`) moves the row to where it now belongs as part of the same undo step. Which rows belong to the
     same video, and the order of the videos, comes from `video_rank`.
+
+    The `Comment` column is free text that may span several lines. It is presented either as text (its first
+    line, with an ellipsis when there is more) or, when the view is too narrow (`set_comment_display`), as an icon
+    telling whether a comment exists; the full comment is always available through `EditRole` and `ToolTipRole`.
     """
 
     class Column(enum.IntEnum):
@@ -200,23 +216,34 @@ class EventTableModel(QtCore.QAbstractTableModel):
         STYLE = 4
         DANCE = 5
         ROUND = 6
+        COMMENT = 7
 
+    class CommentDisplay(enum.Enum):
+        """How `Column.COMMENT` presents itself: the comment text, or an icon telling whether one exists."""
+
+        TEXT = "text"
+        ICON = "icon"
+
+    # The columns describing the event: autocompleted, fillable, and sharing the table's spare width.
     TEXT_COLUMNS = (
         Column.LEVEL,
         Column.STYLE,
         Column.DANCE,
         Column.ROUND,
     )
+    # Every free-text column, i.e. the scope of Find and Replace.
+    SEARCHABLE_COLUMNS = (*TEXT_COLUMNS, Column.COMMENT)
     _EDITABLE_COLUMNS = frozenset(
         {
             Column.INPOINT,
-            *TEXT_COLUMNS,
+            *SEARCHABLE_COLUMNS,
         }
     )
-    # Columns whose value can be copied into neighbouring rows with the fill handle; an inpoint never should be.
+    # Columns whose value can be copied into neighbouring rows with the fill handle; an inpoint never should be, and
+    # a comment cell may be only an icon wide.
     _FILLABLE_COLUMNS = frozenset(TEXT_COLUMNS)
     # Columns that may be left empty; `Inpoint` is required and `File` / `Inpoint Formatted` are read-only.
-    _CLEARABLE_COLUMNS = frozenset(TEXT_COLUMNS)
+    _CLEARABLE_COLUMNS = frozenset(SEARCHABLE_COLUMNS)
     _RIGHT_ALIGNED_COLUMNS = frozenset(
         {
             Column.INPOINT,
@@ -242,6 +269,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         self._undo_stack = QtGui.QUndoStack(self)
         self._removing_rows = False
         self._video_rank = video_rank
+        self._comment_display = self.CommentDisplay.TEXT
 
     @property
     def is_removing_rows(self) -> bool:
@@ -251,6 +279,30 @@ class EventTableModel(QtCore.QAbstractTableModel):
         keep the playhead where it is instead of treating that move as the user selecting the neighbour.
         """
         return self._removing_rows
+
+    @property
+    def comment_display(self) -> CommentDisplay:
+        """Returns how the `Comment` column is presented (see `set_comment_display`)."""
+        return self._comment_display
+
+    def set_comment_display(self, display: CommentDisplay) -> None:
+        """Presents the `Comment` column as text or as a presence icon, notifying views when that changes.
+
+        In `ICON` mode the column's cells and header show an icon through `DecorationRole` and no `DisplayRole`
+        text, which suits a column only an icon wide; the comment itself stays available via `EditRole` and
+        `ToolTipRole`.
+        """
+        if display == self._comment_display:
+            return
+        self._comment_display = display
+        column = int(self.Column.COMMENT)
+        self.headerDataChanged.emit(QtCore.Qt.Orientation.Horizontal, column, column)
+        if self._records:
+            self.dataChanged.emit(
+                self.index(0, column),
+                self.index(len(self._records) - 1, column),
+                [QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.DecorationRole],
+            )
 
     @classmethod
     def is_fillable(cls, column: Column | int) -> bool:
@@ -310,15 +362,21 @@ class EventTableModel(QtCore.QAbstractTableModel):
         orientation: QtCore.Qt.Orientation,
         role: int = QtCore.Qt.ItemDataRole.DisplayRole,
     ) -> Any:
-        if role != QtCore.Qt.ItemDataRole.DisplayRole:
-            return None
-        if orientation == QtCore.Qt.Orientation.Horizontal and 0 <= section < len(
-            ballroom_scribe.EventRecorder.COLUMNS
-        ):
-            return ballroom_scribe.EventRecorder.COLUMNS[section]
         if orientation == QtCore.Qt.Orientation.Vertical:
-            return str(section + 1)
-        return None
+            return str(section + 1) if role == QtCore.Qt.ItemDataRole.DisplayRole else None
+        if not 0 <= section < len(ballroom_scribe.EventRecorder.COLUMNS):
+            return None
+        name = ballroom_scribe.EventRecorder.COLUMNS[section]
+        if section == int(self.Column.COMMENT):
+            compact = self._comment_display == self.CommentDisplay.ICON
+            if role == QtCore.Qt.ItemDataRole.DisplayRole:
+                return "" if compact else name
+            if role == QtCore.Qt.ItemDataRole.DecorationRole and compact:
+                return ballroom_scribe.gui.utils.comment_icon(False)
+            if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+                return name
+            return None
+        return name if role == QtCore.Qt.ItemDataRole.DisplayRole else None
 
     @override
     def flags(self, index: QtCore.QModelIndex | QtCore.QPersistentModelIndex) -> QtCore.Qt.ItemFlag:
@@ -340,6 +398,8 @@ class EventTableModel(QtCore.QAbstractTableModel):
         record = self._records[index.row()]
         column = self.Column(index.column())
 
+        if column == self.Column.COMMENT:
+            return self._comment_data(record, role)
         if role == QtCore.Qt.ItemDataRole.DisplayRole:
             return _column_text_value(record, column)
         if role == QtCore.Qt.ItemDataRole.EditRole:
@@ -350,6 +410,21 @@ class EventTableModel(QtCore.QAbstractTableModel):
             return str(record.file)
         if role == QtCore.Qt.ItemDataRole.TextAlignmentRole and column in self._RIGHT_ALIGNED_COLUMNS:
             return int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        return None
+
+    def _comment_data(self, record: ballroom_scribe.models.EventRecord, role: int) -> Any:
+        """Returns the `Comment` cell's data for `role`, honouring `comment_display`."""
+        compact = self._comment_display == self.CommentDisplay.ICON
+        if role == QtCore.Qt.ItemDataRole.DisplayRole:
+            return "" if compact else _comment_summary(record.comment)
+        if role == QtCore.Qt.ItemDataRole.EditRole:
+            return record.comment
+        if role == QtCore.Qt.ItemDataRole.DecorationRole and compact:
+            return ballroom_scribe.gui.utils.comment_icon(bool(record.comment))
+        if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+            if record.comment:
+                return record.comment
+            return "Click to add a comment" if compact else None
         return None
 
     @override
@@ -382,6 +457,8 @@ class EventTableModel(QtCore.QAbstractTableModel):
                 return False
             new_record = dataclasses.replace(old_record, inpoint_seconds=seconds)
         else:
+            if column == self.Column.COMMENT:
+                text = text.replace("\r\n", "\n").replace("\r", "\n")  # Comments may span lines; store them uniformly.
             new_record = _with_text_value(old_record, column, text)
 
         if new_record == old_record:
@@ -398,7 +475,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         return True
 
     def clear_cell(self, index: QtCore.QModelIndex | QtCore.QPersistentModelIndex) -> bool:
-        """Empties a `Level`, `Style`, `Dance`, or `Round` cell as an undoable command.
+        """Empties a `Level`, `Style`, `Dance`, `Round`, or `Comment` cell as an undoable command.
 
         Returns:
             Whether the cell changed. Other columns, invalid indexes, and empty cells are left alone, and nothing is
@@ -572,7 +649,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         self,
         query: str,
         *,
-        columns: Sequence[Column | int] = TEXT_COLUMNS,
+        columns: Sequence[Column | int] = SEARCHABLE_COLUMNS,
         rows: Iterable[int] | None = None,
         case_sensitive: bool = False,
         whole_cell: bool = False,
@@ -581,13 +658,13 @@ class EventTableModel(QtCore.QAbstractTableModel):
 
         Args:
             query: Literal text to search for; an empty string matches nothing.
-            columns: Text columns to search (defaults to `TEXT_COLUMNS`).
+            columns: Free-text columns to search (defaults to `SEARCHABLE_COLUMNS`).
             rows: Row indices to search, in any order (`None` searches every row).
             case_sensitive: Match exact letter case instead of ignoring case.
             whole_cell: Require the entire cell value to match `query` rather than any substring.
 
         Raises:
-            ValueError: If `columns` includes a column outside `TEXT_COLUMNS`.
+            ValueError: If `columns` includes a column outside `SEARCHABLE_COLUMNS`.
             IndexError: If `rows` includes an out-of-range row index.
         """
         target_columns = self._validated_text_columns(columns)
@@ -618,7 +695,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
             Whether the cell's value changed. Nothing is pushed onto `undo_stack` when `False`.
 
         Raises:
-            ValueError: If `index` is valid and its column is outside `TEXT_COLUMNS`.
+            ValueError: If `index` is valid and its column is outside `SEARCHABLE_COLUMNS`.
         """
         if not index.isValid() or not 0 <= index.row() < len(self._records):
             return False
@@ -645,7 +722,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         query: str,
         replacement: str,
         *,
-        columns: Sequence[Column | int] = TEXT_COLUMNS,
+        columns: Sequence[Column | int] = SEARCHABLE_COLUMNS,
         rows: Iterable[int] | None = None,
         case_sensitive: bool = False,
         whole_cell: bool = False,
@@ -656,7 +733,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
             The number of cells whose value changed. Nothing is pushed onto `undo_stack` when zero.
 
         Raises:
-            ValueError: If `columns` includes a column outside `TEXT_COLUMNS`.
+            ValueError: If `columns` includes a column outside `SEARCHABLE_COLUMNS`.
             IndexError: If `rows` includes an out-of-range row index.
         """
         target_columns = self._validated_text_columns(columns)
@@ -695,7 +772,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         converted: list[EventTableModel.Column] = []
         for raw_col in columns:
             col = cls.Column(raw_col)
-            if col not in cls.TEXT_COLUMNS:
+            if col not in cls.SEARCHABLE_COLUMNS:
                 raise ValueError(f"Column {col.name} does not support text find/replace.")
             converted.append(col)
         return tuple(sorted(set(converted), key=int))

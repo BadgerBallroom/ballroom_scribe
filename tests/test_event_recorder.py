@@ -74,10 +74,10 @@ class TestRecord(unittest.TestCase):
                 ],
                 formatted_inpoints=["0:00:12.35", "0:01:07.89", "0:00:05.00"],
                 expected_rows=[
-                    ("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round"),
-                    (_FAKE_INPUT_VIDEO_A, 12.345, "0:00:12.35", "Bronze", "Standard", "Waltz", "Final"),
-                    (_FAKE_INPUT_VIDEO_A, 67.890, "0:01:07.89", "Silver", "Smooth", "Tango", "Final"),
-                    (_FAKE_INPUT_VIDEO_B, 5.0, "0:00:05.00", "Gold", "Latin", "Cha Cha", "Semifinal"),
+                    ("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round", "Comment"),
+                    (_FAKE_INPUT_VIDEO_A, 12.345, "0:00:12.35", "Bronze", "Standard", "Waltz", "Final", ""),
+                    (_FAKE_INPUT_VIDEO_A, 67.890, "0:01:07.89", "Silver", "Smooth", "Tango", "Final", ""),
+                    (_FAKE_INPUT_VIDEO_B, 5.0, "0:00:05.00", "Gold", "Latin", "Cha Cha", "Semifinal", ""),
                 ],
             ),
             param(
@@ -85,7 +85,7 @@ class TestRecord(unittest.TestCase):
                 events=[],
                 formatted_inpoints=[],
                 expected_rows=[
-                    ("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round"),
+                    ("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round", "Comment"),
                 ],
             ),
         ]
@@ -125,6 +125,7 @@ class TestWrite(unittest.TestCase):
                 style="Standard",
                 dance="Waltz",
                 round="Final",
+                comment="Check music,\nthen lights",
             ),
             ballroom_scribe.models.EventRecord(
                 file=_FAKE_INPUT_VIDEO_B,
@@ -143,9 +144,20 @@ class TestWrite(unittest.TestCase):
         self.assertEqual(
             self.mock_csv_writer.return_value.writerow.call_args_list,
             [
-                call(("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round")),
-                call((_FAKE_INPUT_VIDEO_A, 12.345, "0:00:12.34", "Bronze", "Standard", "Waltz", "Final")),
-                call((_FAKE_INPUT_VIDEO_B, 5.0, "0:00:05.00", "", "", "", "")),
+                call(("File", "Inpoint", "Inpoint Formatted", "Level", "Style", "Dance", "Round", "Comment")),
+                call(
+                    (
+                        _FAKE_INPUT_VIDEO_A,
+                        12.345,
+                        "0:00:12.34",
+                        "Bronze",
+                        "Standard",
+                        "Waltz",
+                        "Final",
+                        "Check music,\nthen lights",
+                    )
+                ),
+                call((_FAKE_INPUT_VIDEO_B, 5.0, "0:00:05.00", "", "", "", "", "")),
             ],
         )
 
@@ -205,6 +217,21 @@ class TestRead(unittest.TestCase):
         self.assertEqual(captured, [("Notes", "Heat")])
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0].dance, "Foxtrot")
+        self.assertEqual(records[0].comment, "")
+
+    def test_reads_optional_comment_column_including_quoted_commas_and_line_breaks(self):
+        self._mock_csv(
+            "File,Inpoint,Inpoint Formatted,Level,Style,Dance,Round,Comment,Heat\n"
+            'fake_input_a.mp4,1.5,0:00:01.50,Silver,Smooth,Foxtrot,Final,"Check music,\nthen lights",42\n'
+            "fake_input_b.mp4,5.0,0:00:05.00,,,,,,43\n"
+        )
+        captured: list[tuple[str, ...]] = []
+        recorder = ballroom_scribe.EventRecorder()
+
+        records = list(recorder.read(_FAKE_OUTPUT_CSV, on_extra_columns=captured.append))
+
+        self.assertEqual(captured, [("Heat",)])  # `Comment` is a known column, so only `Heat` is extra.
+        self.assertEqual([record.comment for record in records], ["Check music,\nthen lights", ""])
 
     @parameterized.expand(
         [

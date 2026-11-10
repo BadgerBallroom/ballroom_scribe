@@ -1,4 +1,5 @@
 from .autocomplete_delegate import AutocompleteDelegate
+from .comment_delegate import CommentDelegate
 from .current_cell_delegate import CurrentCellDelegate
 from .event_table_model import EventTableModel
 from .event_table_view import EventTableView
@@ -13,6 +14,7 @@ from .waveform_widget import WaveformWidget
 
 __all__ = [
     "AutocompleteDelegate",
+    "CommentDelegate",
     "CurrentCellDelegate",
     "EventTableModel",
     "EventTableView",

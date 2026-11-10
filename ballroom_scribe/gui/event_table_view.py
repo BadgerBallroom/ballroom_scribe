@@ -52,12 +52,14 @@ class EventTableView(QtWidgets.QTableView):
         leaving `Space`, `,`, `.`, and `Ctrl+...` shortcuts intact) and opens the current cell's editor with the
         typed character replacing its value (requires `EditTrigger.AnyKeyPressed`, set by `MainWindow`). Type-to-search
         is disabled so typing never jumps to another row.
-    *   `Delete` and `Backspace` clear the current `Level`, `Style`, `Dance`, or `Round` cell as one undo step via
-        `EventTableModel.clear_cell` instead of deleting the event.
+    *   `Delete` and `Backspace` clear the current `Level`, `Style`, `Dance`, `Round`, or `Comment` cell as one undo
+        step via `EventTableModel.clear_cell` instead of deleting the event.
     *   The current cell of a fillable column (see `EventTableModel.is_fillable`) shows a small square in its
         bottom-right corner. Pressing it and dragging up or down outlines the rows passed over and, on release, copies
         the cell's value into them through `EventTableModel.fill` as one undo step. The press never reaches
         `QTableView`, so it does not change the selection or current row. `Esc` cancels a drag.
+    *   While the `Comment` column shows only presence icons (`EventTableModel.CommentDisplay.ICON`), a plain click on
+        one of them opens the comment editor once the click has selected its row as usual.
     *   While two or more rows are selected (`has_multiple_selected_rows`), no single cell is singled out: the
         current-cell frame and fill handle are hidden, `selected_row()` returns `None` (disabling the faint
         same-event tint), and single-cell keys (`Delete`, `Backspace`, letters, digits) are accepted as no-ops.
@@ -72,6 +74,7 @@ class EventTableView(QtWidgets.QTableView):
         self._fill_origin = QtCore.QPersistentModelIndex()
         self._fill_target_row = -1
         self._drag_position = QtCore.QPoint()
+        self._pressed_comment_icon = QtCore.QPersistentModelIndex()
         self._search_matches: frozenset[tuple[int, int]] = frozenset()
         self._active_search_match: tuple[int, int] | None = None
         self._autoscroll_timer = QtCore.QTimer(self)
@@ -206,6 +209,7 @@ class EventTableView(QtWidgets.QTableView):
             self._begin_fill(position)
             event.accept()
             return
+        self._pressed_comment_icon = self._comment_icon_at(position, event)
         super().mousePressEvent(event)
 
     @override
@@ -226,7 +230,17 @@ class EventTableView(QtWidgets.QTableView):
                 self._finish_fill()
             event.accept()
             return
-        super().mouseReleaseEvent(event)
+        pressed = QtCore.QModelIndex(self._pressed_comment_icon)
+        self._pressed_comment_icon = QtCore.QPersistentModelIndex()
+        super().mouseReleaseEvent(event)  # Selects the row (and jumps to its inpoint) as for any other cell.
+        if (
+            pressed.isValid()
+            and event.button() == QtCore.Qt.MouseButton.LeftButton
+            and self.indexAt(event.position().toPoint()) == pressed
+            and self.state() != _EDITING
+            and not self.has_multiple_selected_rows
+        ):
+            self.edit(pressed)
 
     @override
     def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:
@@ -282,6 +296,22 @@ class EventTableView(QtWidgets.QTableView):
         model = self.model()
         if isinstance(model, ballroom_scribe.gui.EventTableModel):
             model.clear_cell(self.currentIndex())
+
+    def _comment_icon_at(self, position: QtCore.QPoint, event: QtGui.QMouseEvent) -> QtCore.QPersistentModelIndex:
+        """Returns the comment icon under a plain left press (no `Shift` / `Ctrl`), or an invalid index."""
+        model = self.model()
+        index = self.indexAt(position)
+        if (
+            event.button() != QtCore.Qt.MouseButton.LeftButton
+            or event.modifiers()
+            & (QtCore.Qt.KeyboardModifier.ShiftModifier | QtCore.Qt.KeyboardModifier.ControlModifier)
+            or not index.isValid()
+            or not isinstance(model, ballroom_scribe.gui.EventTableModel)
+            or index.column() != int(ballroom_scribe.gui.EventTableModel.Column.COMMENT)
+            or model.comment_display != ballroom_scribe.gui.EventTableModel.CommentDisplay.ICON
+        ):
+            return QtCore.QPersistentModelIndex()
+        return QtCore.QPersistentModelIndex(index)
 
     def _handle_index(self) -> QtCore.QModelIndex | None:
         """Returns the cell showing a handle: the current cell of a fillable column while focused and not editing."""

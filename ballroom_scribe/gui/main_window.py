@@ -19,6 +19,10 @@ _CSV_FILE_FILTER = "CSV Files (*.csv);;All Files (*)"
 _MIN_FILE_COLUMN_WIDTH = 160
 _MAX_FILE_COLUMN_WIDTH = 180
 _MIN_TEXT_COLUMN_WIDTH = 90
+# The `Comment` column shows its text only when it can start this wide while `Level` … `Round` keep their minimum;
+# otherwise it shrinks to a presence icon.
+_MIN_COMMENT_TEXT_WIDTH = 160
+_COMMENT_ICON_COLUMN_WIDTH = 28
 _DEFAULT_WINDOW_WIDTH = 1400
 _DEFAULT_WINDOW_HEIGHT = 820
 # Initial video : table width ratio of the horizontal splitter.
@@ -59,6 +63,17 @@ def _alt_is_held() -> bool:
 def _marker_label(row: int, record: ballroom_scribe.models.EventRecord) -> str:
     parts = [part for part in (record.level, record.style, record.dance, record.round) if part]
     return " ".join(parts) if parts else f"Event #{row + 1}"
+
+
+def _distribute_width(total: int, weights: Sequence[float]) -> list[int]:
+    """Splits `total` pixels across columns in proportion to `weights`, each at least `_MIN_TEXT_COLUMN_WIDTH`.
+
+    Rounding leftovers go to the last column so the columns fill `total` exactly.
+    """
+    total_weight = sum(weights)
+    widths = [max(_MIN_TEXT_COLUMN_WIDTH, round(total * weight / total_weight)) for weight in weights]
+    widths[-1] += max(0, total - sum(widths))
+    return widths
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -404,7 +419,7 @@ class MainWindow(QtWidgets.QMainWindow):
             | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         header = self._table_view.horizontalHeader()
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)  # `_fit_text_columns` fills the width; the comment column may stay narrow.
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
 
         # Rows are selected as a whole, so the delegates frame the current cell to show where typing or `Enter` edits.
@@ -412,6 +427,10 @@ class MainWindow(QtWidgets.QMainWindow):
         delegate = ballroom_scribe.gui.AutocompleteDelegate(self._table_view)
         for text_column in ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS:
             self._table_view.setItemDelegateForColumn(int(text_column), delegate)
+        self._table_view.setItemDelegateForColumn(
+            int(ballroom_scribe.gui.EventTableModel.Column.COMMENT),
+            ballroom_scribe.gui.CommentDelegate(self._table_view),
+        )
         # Keeps the text columns filling the table as it is resized (see `eventFilter`).
         self._table_view.viewport().installEventFilter(self)
         self._resize_table_columns()
@@ -434,29 +453,54 @@ class MainWindow(QtWidgets.QMainWindow):
         self._fit_text_columns(equalize=True)
 
     def _fit_text_columns(self, *, equalize: bool) -> None:
-        """Makes `Level`, `Style`, `Dance`, and `Round` share the width left over by the other columns.
+        """Makes the text columns share the width left over by the other columns, fitting `Comment` in as it allows.
+
+        `Level`, `Style`, `Dance`, and `Round` always share that width. `Comment` joins them (starting at least
+        `_MIN_COMMENT_TEXT_WIDTH` wide) when the four can still keep `_MIN_TEXT_COLUMN_WIDTH` each; otherwise it
+        becomes a fixed `_COMMENT_ICON_COLUMN_WIDTH` column showing only whether a comment exists.
 
         Args:
-            equalize: Give the four columns equal widths; otherwise keep their current proportions (as adjusted by
-                the user) while filling the available width.
+            equalize: Give the shared columns equal widths; otherwise keep their current proportions (as adjusted by
+                the user) while filling the available width. A switch between the comment presentations always
+                re-equalizes, since the previous widths no longer mean anything.
         """
         header = self._table_view.horizontalHeader()
-        text_sections = [int(column) for column in ballroom_scribe.gui.EventTableModel.TEXT_COLUMNS]
+        model_cls = ballroom_scribe.gui.EventTableModel
+        shared = [int(column) for column in model_cls.TEXT_COLUMNS]
+        comment = int(model_cls.Column.COMMENT)
         fixed_width = sum(
-            header.sectionSize(section) for section in range(header.count()) if section not in text_sections
+            header.sectionSize(section)
+            for section in range(header.count())
+            if section not in shared and section != comment
         )
-        available = max(
-            self._table_view.viewport().width() - fixed_width,
-            len(text_sections) * _MIN_TEXT_COLUMN_WIDTH,
-        )
-        weights = [1.0] * len(text_sections)
-        if not equalize:
-            current = [float(header.sectionSize(section)) for section in text_sections]
-            if sum(current) > 0:
-                weights = current
-        total_weight = sum(weights)
-        for section, weight in zip(text_sections, weights, strict=True):
-            header.resizeSection(section, max(_MIN_TEXT_COLUMN_WIDTH, round(available * weight / total_weight)))
+        available = self._table_view.viewport().width() - fixed_width
+        compact = available < len(shared) * _MIN_TEXT_COLUMN_WIDTH + _MIN_COMMENT_TEXT_WIDTH
+        display = model_cls.CommentDisplay.ICON if compact else model_cls.CommentDisplay.TEXT
+        equalize = equalize or display != self._table_model.comment_display
+        self._table_model.set_comment_display(display)
+
+        if compact:
+            header.setSectionResizeMode(comment, QtWidgets.QHeaderView.ResizeMode.Fixed)
+            header.resizeSection(comment, _COMMENT_ICON_COLUMN_WIDTH)
+            available -= _COMMENT_ICON_COLUMN_WIDTH
+            comment_width = None
+        else:
+            header.setSectionResizeMode(comment, QtWidgets.QHeaderView.ResizeMode.Interactive)
+            shared.append(comment)
+            comment_width = max(_MIN_COMMENT_TEXT_WIDTH, round(available / len(shared))) if equalize else None
+        available = max(available, len(shared) * _MIN_TEXT_COLUMN_WIDTH)
+
+        if comment_width is not None:
+            widths = _distribute_width(available - comment_width, [1.0] * (len(shared) - 1)) + [comment_width]
+        else:
+            weights = [1.0] * len(shared)
+            if not equalize:
+                current = [float(header.sectionSize(section)) for section in shared]
+                if sum(current) > 0:
+                    weights = current
+            widths = _distribute_width(available, weights)
+        for section, width in zip(shared, widths, strict=True):
+            header.resizeSection(section, width)
 
     def _build_actions_menus_and_toolbar(self) -> None:
         self._open_videos_action = QtGui.QAction("Open Videos…", self)

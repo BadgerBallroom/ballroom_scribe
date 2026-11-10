@@ -1,3 +1,4 @@
+import dataclasses
 import pathlib
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,21 @@ class TestEventRecord(unittest.TestCase):
 
         self.assertEqual(record.inpoint_formatted, "0:01:23.46")
         mock_format_duration.assert_called_once_with(83.456)
+
+    def test_comment_defaults_to_empty_and_may_span_lines(self):
+        record = ballroom_scribe.models.EventRecord(
+            file=pathlib.Path("session.mp4"),
+            inpoint_seconds=1.0,
+            level="",
+            style="",
+            dance="",
+            round="",
+        )
+
+        self.assertEqual(record.comment, "")
+        annotated = dataclasses.replace(record, comment="Check music\nbefore heat 2")
+        self.assertEqual(annotated.comment, "Check music\nbefore heat 2")
+        self.assertNotEqual(annotated, record)
 
     def test_from_event_copies_fields(self):
         video_path = pathlib.Path("/videos/heat1.mp4")

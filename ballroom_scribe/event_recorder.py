@@ -57,6 +57,7 @@ def _parse_row(row: Mapping[str, str | None], row_number: int) -> ballroom_scrib
         style=row["Style"] or "",
         dance=row["Dance"] or "",
         round=row["Round"] or "",
+        comment=row.get("Comment") or "",  # Optional: files written before comments existed load without it.
     )
 
 
@@ -71,6 +72,7 @@ class EventRecorder:
         "Style",
         "Dance",
         "Round",
+        "Comment",
     )
 
     def write(
@@ -79,6 +81,8 @@ class EventRecorder:
         target: pathlib.Path,
     ) -> None:
         """Writes event records to a CSV file.
+
+        Comments containing commas, quotes, or line breaks are quoted by the `csv` module.
 
         Args:
             records: The event records to write, in output order.
@@ -97,6 +101,7 @@ class EventRecorder:
                         record.style,
                         record.dance,
                         record.round,
+                        record.comment,
                     )
                 )
 
@@ -126,7 +131,8 @@ class EventRecorder:
     ) -> Generator[ballroom_scribe.models.EventRecord]:
         """Streams `EventRecord`s from an existing CSV file.
 
-        `Inpoint Formatted` and any extra unknown columns are ignored (`Inpoint Formatted` is recomputed on save).
+        `Inpoint Formatted` and any extra unknown columns are ignored (`Inpoint Formatted` is recomputed on save), and
+        the `Comment` column is optional: files written before it existed load with empty comments.
 
         Args:
             source: Path to the CSV file to read.
