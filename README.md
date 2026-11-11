@@ -221,6 +221,12 @@ including Qt multimedia backend diagnostics, to the console.
 *   **Missing videos**: If a CSV references a video that cannot be opened (perhaps because it was moved or renamed), you
     can still edit rows for that video. Use **File → Locate Video…** to relink. **Open Videos…** also offers to relink
     when an opened file has the same name as an offline video. Relinking rewrites the rows' `File` values.
+*   **Managing videos**: **Tools → Manage Videos…** allows you to reorder and remove videos.
+    *   Reordering videos also reorders the rows in the table.
+    *   Removing a video also removes any rows that reference it.
+*   **Repairing the row order**: If a CSV was edited outside the editor:
+    *   **Tools → Repair → Group Rows by Video** brings each video's rows together in drop-down order.
+    *   **Sort Rows by Inpoint** sorts each video's rows by time.
 
 ### Keyboard Shortcuts
 

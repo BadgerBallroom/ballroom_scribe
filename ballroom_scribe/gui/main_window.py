@@ -3,7 +3,7 @@
 import logging
 import pathlib
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import override
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -98,6 +98,22 @@ def _expected_video_location(record_file: pathlib.Path, csv_dir: pathlib.Path) -
     return record_file if record_file.is_absolute() else csv_dir / record_file
 
 
+def _video_labels(videos: Sequence[ballroom_scribe.gui.models.SessionVideo]) -> list[str]:
+    """Returns the Video drop-down label of each video: its file name, disambiguated by folder, `(offline)` if so."""
+    name_counts: dict[str, int] = {}
+    for video in videos:
+        name_counts[video.input_video.name] = name_counts.get(video.input_video.name, 0) + 1
+    labels: list[str] = []
+    for video in videos:
+        label = video.input_video.name
+        if name_counts[label] > 1:
+            label = f"{label} ({video.input_video.parent.name})"
+        if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
+            label = f"{label} (offline)"
+        labels.append(label)
+    return labels
+
+
 def _relinked_csv_path(
     old_csv_file: pathlib.Path,
     located: pathlib.Path,
@@ -142,6 +158,47 @@ class _RelinkVideoCommand(QtGui.QUndoCommand):
     @override
     def undo(self) -> None:
         self._window._apply_relink(self._loaded.csv_file, self._offline)
+
+
+class _VideoOrderCommand(QtGui.QUndoCommand):
+    """Undoable change of the session's video order (the Video drop-down), pushed alongside the row regrouping."""
+
+    def __init__(
+        self,
+        window: MainWindow,
+        old_order: Sequence[pathlib.Path],
+        new_order: Sequence[pathlib.Path],
+    ) -> None:
+        super().__init__("Reorder Videos")
+        self._window = window
+        self._old_order = tuple(old_order)
+        self._new_order = tuple(new_order)
+
+    @override
+    def redo(self) -> None:
+        self._window._apply_video_order(self._new_order)
+
+    @override
+    def undo(self) -> None:
+        self._window._apply_video_order(self._old_order)
+
+
+class _RemoveVideoCommand(QtGui.QUndoCommand):
+    """Undoable removal of a session video (loaded or offline), pushed alongside the deletion of its rows."""
+
+    def __init__(self, window: MainWindow, index: int, video: ballroom_scribe.gui.models.SessionVideo) -> None:
+        super().__init__("Remove Video")
+        self._window = window
+        self._index = index
+        self._video = video
+
+    @override
+    def redo(self) -> None:
+        self._window._apply_video_removal(self._video.csv_file)
+
+    @override
+    def undo(self) -> None:
+        self._window._apply_video_insert(self._index, self._video)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -551,6 +608,88 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         return True
 
+    def apply_video_changes(
+        self,
+        order: Sequence[pathlib.Path],
+        removed: Sequence[pathlib.Path] = (),
+    ) -> None:
+        """Applies a Manage Videos… result: removes `removed` with all their rows, then reorders to `order`.
+
+        Rows of the remaining videos regroup by video in the new order (their order within a video is untouched).
+        Everything that changes the table forms one undo step — `Remove Video`, `Remove N Videos`,
+        `Reorder Videos`, or `Manage Videos` — which also restores the removed entries and the drop-down order on
+        undo; a change that deletes or moves no rows is applied to the session directly.
+
+        Args:
+            order: The remaining videos' keys in the wanted drop-down order (videos left out keep their relative
+                order after the listed ones, as in `VideoSession.reorder`).
+            removed: Keys of the videos to remove together with their rows.
+        """
+        removals: list[tuple[int, ballroom_scribe.gui.models.SessionVideo, tuple[int, ...]]] = []
+        remaining = list(self._session.videos)
+        for csv_file in dict.fromkeys(removed):
+            video = self._session.get(csv_file)
+            if video is None:
+                continue
+            index = remaining.index(video)  # Where it sits when its removal runs, so undo re-inserts it there.
+            remaining.pop(index)
+            removals.append((index, video, self._table_model.rows_of_video(csv_file)))
+        rows_to_delete = sorted({row for _, _, rows in removals for row in rows})
+
+        order_after_removal = [video.csv_file for video in remaining]
+        listed = [csv_file for csv_file in dict.fromkeys(order) if csv_file in order_after_removal]
+        new_order = [*listed, *(csv_file for csv_file in order_after_removal if csv_file not in set(listed))]
+        order_changed = new_order != order_after_removal
+
+        kept_records = [
+            record for row, record in enumerate(self._table_model.records) if row not in set(rows_to_delete)
+        ]
+        permutation = ballroom_scribe.gui.utils.group_rows_by_video(kept_records, self._rank_in_order(new_order))
+        rows_move = permutation != tuple(range(len(kept_records)))
+
+        if not rows_to_delete and not rows_move:
+            for _, video, _ in removals:
+                self._apply_video_removal(video.csv_file)
+            if order_changed:
+                self._apply_video_order(new_order)
+            return
+
+        if removals and order_changed:
+            description = "Manage Videos"
+        elif removals:
+            description = "Remove Video" if len(removals) == 1 else f"Remove {len(removals)} Videos"
+        else:
+            description = "Reorder Videos"
+        stack = self._table_model.undo_stack
+        stack.beginMacro(description)
+        try:
+            for index, video, _ in removals:
+                stack.push(_RemoveVideoCommand(self, index, video))
+            if rows_to_delete:
+                self._table_model.remove_records(rows_to_delete)
+            if order_changed:
+                stack.push(_VideoOrderCommand(self, order_after_removal, new_order))
+            if rows_move:
+                self._table_model.reorder_rows(permutation, description)
+        finally:
+            stack.endMacro()
+
+    def reorder_videos(self, order: Sequence[pathlib.Path]) -> None:
+        """Applies a new Video drop-down order; rows regroup by video in that order as one undo step."""
+        self.apply_video_changes(order)
+
+    def group_rows_by_video(self) -> None:
+        """Brings each video's rows together in drop-down order, keeping their relative order (one undo step)."""
+        order = ballroom_scribe.gui.utils.group_rows_by_video(self._table_model.records, self._video_rank)
+        if not self._table_model.reorder_rows(order, "Group Rows by Video"):
+            self.statusBar().showMessage("Rows are already grouped by video.", 4000)
+
+    def sort_rows_by_inpoint(self) -> None:
+        """Sorts each video's rows by `Inpoint` among the positions it occupies (one undo step)."""
+        order = ballroom_scribe.gui.utils.sort_rows_by_inpoint(self._table_model.records, self._video_rank)
+        if not self._table_model.reorder_rows(order, "Sort Rows by Inpoint"):
+            self.statusBar().showMessage("Each video's rows are already in Inpoint order.", 4000)
+
     @override
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if not self._confirm_discard_or_save():
@@ -788,6 +927,27 @@ class MainWindow(QtWidgets.QMainWindow):
         _with_shortcut_hint(self._run_pipeline_action, "Run find_timestamps.py on the loaded video(s)")
         self._run_pipeline_action.triggered.connect(self._open_pipeline_dialog)
 
+        self._manage_videos_action = QtGui.QAction("Manage Videos…", self)
+        _with_shortcut_hint(
+            self._manage_videos_action,
+            "Reorder the videos (regrouping the table rows by video) or remove videos together with their rows",
+        )
+        self._manage_videos_action.triggered.connect(self._open_manage_videos_dialog)
+
+        self._group_rows_action = QtGui.QAction("Group Rows by Video", self)
+        _with_shortcut_hint(
+            self._group_rows_action,
+            "Bring each video's rows together in Video drop-down order, keeping their relative order",
+        )
+        self._group_rows_action.triggered.connect(self.group_rows_by_video)
+
+        self._sort_rows_action = QtGui.QAction("Sort Rows by Inpoint", self)
+        _with_shortcut_hint(
+            self._sort_rows_action,
+            "Sort each video's rows by Inpoint among the positions that video occupies",
+        )
+        self._sort_rows_action.triggered.connect(self.sort_rows_by_inpoint)
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self._open_videos_action)
         file_menu.addAction(self._open_csv_action)
@@ -827,7 +987,12 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addAction(self._reset_zoom_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
+        tools_menu.addAction(self._manage_videos_action)
         tools_menu.addAction(self._run_pipeline_action)
+        tools_menu.addSeparator()
+        repair_menu = tools_menu.addMenu("Repair")
+        repair_menu.addAction(self._group_rows_action)
+        repair_menu.addAction(self._sort_rows_action)
 
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
@@ -839,6 +1004,7 @@ class MainWindow(QtWidgets.QMainWindow):
         toolbar.addWidget(self._video_combo)
         toolbar.addWidget(QtWidgets.QLabel(" Ch: ", self))
         toolbar.addWidget(self._channel_spin)
+        toolbar.addAction(self._manage_videos_action)
         toolbar.addSeparator()
         toolbar.addAction(self._go_to_event_action)
         toolbar.addAction(self._set_inpoint_action)
@@ -916,6 +1082,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._table_model.rowsInserted.connect(self._on_model_rows_changed)
         self._table_model.rowsRemoved.connect(self._on_model_rows_changed)
         self._table_model.rowsMoved.connect(self._on_model_rows_changed)
+        self._table_model.layoutChanged.connect(self._on_model_rows_reordered)
         self._table_model.modelReset.connect(self._on_model_reset)
 
     def _prompt_open_videos(self) -> None:
@@ -1131,18 +1298,10 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self._video_combo.clear()
             videos = self._session.videos
-            name_counts: dict[str, int] = {}
-            for video in videos:
-                name_counts[video.input_video.name] = name_counts.get(video.input_video.name, 0) + 1
-
             selected_index = -1
-            for index, video in enumerate(videos):
-                label = video.input_video.name
-                if name_counts[label] > 1:
-                    label = f"{label} ({video.input_video.parent.name})"
+            for index, (video, label) in enumerate(zip(videos, _video_labels(videos), strict=True)):
                 tooltip = str(video.input_video)
                 if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
-                    label = f"{label} (offline)"
                     tooltip = f"{tooltip}\nOffline: {video.reason}"
                 self._video_combo.addItem(label, video.csv_file)
                 self._video_combo.setItemData(index, tooltip, QtCore.Qt.ItemDataRole.ToolTipRole)
@@ -1225,6 +1384,69 @@ class MainWindow(QtWidgets.QMainWindow):
         self._rebuild_video_combo(select_csv_file=select)
         self._refresh_waveform_markers()
         self._update_action_states()
+
+    def _apply_video_order(self, order: Sequence[pathlib.Path]) -> None:
+        """Reorders the session's videos, keeping the active video active (so the playhead stays put)."""
+        self._session.reorder(order)
+        self._rebuild_video_combo(select_csv_file=self._active_video.csv_file if self._active_video else None)
+        self._refresh_waveform_markers()
+        self._update_action_states()
+
+    def _apply_video_removal(self, csv_file: pathlib.Path) -> None:
+        """Takes a video out of the session; if it was active, the first remaining video takes over (or nothing)."""
+        if self._session.get(csv_file) is None:
+            return
+        was_active = self._active_video is not None and self._active_video.csv_file == csv_file
+        self._session.remove(csv_file)
+        if was_active:
+            self._waveform_loader.cancel()
+            self._active_video = None
+            if not self._session:
+                self._player.set_source(None)
+                self._waveform.clear()
+            self._rebuild_video_combo(select_csv_file=None)  # Activates the first remaining video, if any.
+        else:
+            self._rebuild_video_combo(select_csv_file=self._active_video.csv_file if self._active_video else None)
+        self._refresh_waveform_markers()
+        self._update_action_states()
+
+    def _apply_video_insert(self, index: int, video: ballroom_scribe.gui.models.SessionVideo) -> None:
+        """Puts a removed video back at `index` (undoing its removal); the active video stays active."""
+        self._session.insert(index, video)
+        select = self._active_video.csv_file if self._active_video is not None else video.csv_file
+        self._rebuild_video_combo(select_csv_file=select)
+        self._refresh_waveform_markers()
+        self._update_action_states()
+
+    def _rank_in_order(self, order: Sequence[pathlib.Path]) -> Callable[[pathlib.Path], int | None]:
+        """Returns a `video_rank` that ranks videos by their position in `order` instead of the session order."""
+        rank_of = {csv_file: rank for rank, csv_file in enumerate(order)}
+        csv_dir = self._current_csv.parent if self._current_csv else None
+
+        def rank(file: pathlib.Path) -> int | None:
+            video = self._session.find_for_record(file, csv_dir=csv_dir)
+            return rank_of.get(video.csv_file) if video is not None else None
+
+        return rank
+
+    def _open_manage_videos_dialog(self) -> None:
+        if not self._session:
+            return
+        entries = [
+            ballroom_scribe.gui.models.VideoEntry(
+                csv_file=video.csv_file,
+                label=label,
+                row_count=len(self._table_model.rows_of_video(video.csv_file)),
+            )
+            for video, label in zip(self._session.videos, _video_labels(self._session.videos), strict=True)
+        ]
+        dialog = ballroom_scribe.gui.ManageVideosDialog(
+            entries,
+            self._active_video.csv_file if self._active_video is not None else None,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.apply_video_changes(dialog.order(), dialog.removed())
 
     def _start_waveform_load(self, video: ballroom_scribe.gui.models.LoadedVideo) -> None:
         self._waveform.set_loading(video.input_video.name)
@@ -1500,6 +1722,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self._find_replace_bar.refresh_matches()
         self._update_action_states()
 
+    def _on_model_rows_reordered(self, *_: object) -> None:
+        """Handles `layoutChanged` after `EventTableModel.reorder_rows` rearranged the rows wholesale."""
+        self._refresh_waveform_markers()
+        self._find_replace_bar.on_rows_reordered()
+        self._update_action_states()
+        current = self._table_view.currentIndex()
+        if current.isValid():
+            self._table_view.scrollTo(current)  # Keeps the row the user is on in view wherever it ended up.
+
     def _on_model_reset(self) -> None:
         self._refresh_waveform_markers()
         self._find_replace_bar.on_model_reset()
@@ -1531,6 +1762,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._zoom_out_action.setEnabled(has_media)
         self._reset_zoom_action.setEnabled(has_media)
         self._run_pipeline_action.setEnabled(bool(self._session.loaded_videos))
+        self._manage_videos_action.setEnabled(bool(self._session))
+        has_several_rows = self._table_model.rowCount() > 1
+        self._group_rows_action.setEnabled(has_several_rows)
+        self._sort_rows_action.setEnabled(has_several_rows)
 
     def _confirm_discard_or_save(self) -> bool:
         if self._table_model.undo_stack.isClean():

@@ -5,6 +5,7 @@ from .event_table_model import EventTableModel
 from .event_table_view import EventTableView
 from .find_replace_bar import FindReplaceBar
 from .main_window import MainWindow
+from .manage_videos_dialog import ManageVideosDialog
 from .pipeline_dialog import PipelineDialog
 from .pipeline_runner import PipelineRunner
 from .video_player_widget import VideoPlayerWidget
@@ -20,6 +21,7 @@ __all__ = [
     "EventTableView",
     "FindReplaceBar",
     "MainWindow",
+    "ManageVideosDialog",
     "PipelineDialog",
     "PipelineRunner",
     "VideoPlayerWidget",

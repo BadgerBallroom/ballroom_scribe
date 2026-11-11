@@ -2444,6 +2444,252 @@ def _check_comment_column(fixture: _Fixture) -> None:
         _settle(fixture.app, 0.1)
 
 
+def _check_manage_videos(fixture: _Fixture) -> None:
+    """Manage Videos… reorders or removes videos (with their rows) and the Repair commands fix the row order."""
+    window = fixture.window
+    view = window.table_view
+    model = window.table_model
+    player = window.player
+    session = window.session
+    col = ballroom_scribe.gui.EventTableModel.Column
+    clip = fixture.clip.resolve()
+    second_clip = fixture.second_clip.resolve()
+    video_combo = window.findChild(QtWidgets.QComboBox, "videoCombo")
+    _expect(video_combo is not None, "Could not find the Video drop-down")
+    assert video_combo is not None
+    manage_action = _action_named(window, "Manage Videos…")
+    group_action = _action_named(window, "Group Rows by Video")
+    sort_action = _action_named(window, "Sort Rows by Inpoint")
+    original_records = list(model.records)
+    _expect(
+        [record.file for record in original_records] == [clip, clip, second_clip]
+        and original_records[0].inpoint_seconds < original_records[1].inpoint_seconds
+        and [video.csv_file for video in session.videos] == [clip, second_clip],
+        f"Unexpected rows {[(r.file.name, r.inpoint_seconds) for r in original_records]} or videos"
+        f" {[v.csv_file.name for v in session.videos]} before managing videos",
+    )
+    first_a, second_a, row_b = original_records  # Two rows of the first clip, in order, then one of the second.
+
+    def rows() -> list[tuple[str, float]]:
+        return [(record.file.name, record.inpoint_seconds) for record in model.records]
+
+    def order() -> list[pathlib.Path]:
+        return [video.csv_file for video in session.videos]
+
+    def dropdown() -> list[pathlib.Path]:
+        return [video_combo.itemData(index) for index in range(video_combo.count())]
+
+    def expect_rows(expected: list[ballroom_scribe.models.EventRecord], context: str) -> None:
+        _expect(
+            list(model.records) == expected,
+            f"Rows are {rows()} {context}, expected {[(r.file.name, r.inpoint_seconds) for r in expected]}",
+        )
+
+    def session_dialog() -> ballroom_scribe.gui.ManageVideosDialog:
+        """Builds the dialog as Tools → Manage Videos… does, without running its modal loop."""
+        entries = [
+            ballroom_scribe.gui.models.VideoEntry(
+                csv_file=video.csv_file,
+                label=video_combo.itemText(index),
+                row_count=len(model.rows_of_video(video.csv_file)),
+            )
+            for index, video in enumerate(session.videos)
+        ]
+        return ballroom_scribe.gui.ManageVideosDialog(entries, video_combo.currentData(), parent=window)
+
+    # 1. The dialog is reachable from the Tools menu and the toolbar; the Repair commands sit in Tools → Repair.
+    tools_menu = next((action.menu() for action in window.menuBar().actions() if action.text() == "&Tools"), None)
+    _expect(tools_menu is not None, "Could not find the Tools menu")
+    assert tools_menu is not None
+    repair_menu = next((action.menu() for action in tools_menu.actions() if action.text() == "Repair"), None)
+    _expect(
+        manage_action in tools_menu.actions()
+        and repair_menu is not None
+        and repair_menu.actions() == [group_action, sort_action],
+        "Tools → Manage Videos… or Tools → Repair is not laid out as expected",
+    )
+    toolbar = window.findChild(QtWidgets.QToolBar)
+    _expect(toolbar is not None and manage_action in toolbar.actions(), "Manage Videos… is missing from the toolbar")
+    _expect(
+        manage_action.isEnabled() and group_action.isEnabled() and sort_action.isEnabled(),
+        "Manage Videos… or the Repair commands are disabled with two videos and three rows",
+    )
+
+    # 2. Repair commands on a table edited outside the editor: Sort Rows by Inpoint sorts each video among its own
+    # positions (the interleaving stays), Group Rows by Video brings each video's rows together; each is one undo
+    # step, the current row follows its record, and the playhead stays put.
+    model.set_records([second_a, row_b, first_a])
+    view.setCurrentIndex(model.index(0, int(col.LEVEL)))
+    fixture.app.processEvents()
+    _expect(
+        abs(player.position_seconds() - second_a.inpoint_seconds) < 1e-3,
+        f"Playhead at {player.position_seconds():.3f} s after selecting the interleaved table's first row",
+    )
+    sort_action.trigger()
+    fixture.app.processEvents()
+    expect_rows([first_a, row_b, second_a], "after Sort Rows by Inpoint")
+    _expect(
+        model.undo_stack.count() == 1 and model.undo_stack.undoText() == "Sort Rows by Inpoint",
+        f"Sort Rows by Inpoint left {model.undo_stack.count()} undo step(s) named {model.undo_stack.undoText()!r}",
+    )
+    _expect(
+        view.currentIndex().row() == 2 and view.selected_rows() == (2,),
+        f"Current row {view.currentIndex().row()} / selection {view.selected_rows()} did not follow the sorted row",
+    )
+    _expect(
+        abs(player.position_seconds() - second_a.inpoint_seconds) < 1e-3,
+        f"Sorting moved the playhead to {player.position_seconds():.3f} s",
+    )
+    group_action.trigger()
+    fixture.app.processEvents()
+    expect_rows(original_records, "after Group Rows by Video")
+    _expect(model.undo_stack.undoText() == "Group Rows by Video", f"Undo text is {model.undo_stack.undoText()!r}")
+    _expect(view.currentIndex().row() == 1, f"Current row {view.currentIndex().row()} did not follow the grouped row")
+    undo_count = model.undo_stack.count()
+    sort_action.trigger()
+    group_action.trigger()
+    fixture.app.processEvents()
+    _expect(
+        model.undo_stack.count() == undo_count and list(model.records) == original_records,
+        "Repair commands on an already repaired table changed something",
+    )
+    _expect(
+        window.statusBar().currentMessage() == "Rows are already grouped by video.",
+        f"Status bar says {window.statusBar().currentMessage()!r} after a no-op Group Rows by Video",
+    )
+    model.undo_stack.undo()
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+    expect_rows([second_a, row_b, first_a], "after undoing both Repair commands")
+    _expect(view.currentIndex().row() == 0, f"Current row {view.currentIndex().row()} after undoing the repairs")
+    model.undo_stack.redo()
+    model.undo_stack.redo()
+    fixture.app.processEvents()
+    expect_rows(original_records, "after redoing both Repair commands")
+
+    # 3. Tools → Manage Videos… opens the dialog listing the videos with their row counts; Remove asks first (No keeps
+    # the entry) and OK applies the new order: the drop-down follows, rows regroup by video in that order, the
+    # active video and playhead stay, and everything is one `Reorder Videos` undo step.
+    failures: list[str] = []
+    no_button = QtWidgets.QMessageBox.StandardButton.No
+
+    def answer_remove_prompt() -> None:
+        """Answers No to the Remove confirmation (runs from a timer inside the prompt's modal loop)."""
+        box = QtWidgets.QApplication.activeModalWidget()
+        if not isinstance(box, QtWidgets.QMessageBox):
+            failures.append(f"Remove did not ask for confirmation (active modal widget: {box})")
+            if box is not None:
+                box.close()
+            return
+        try:
+            if "smoke_clip.mp4" not in box.text() or "2 rows" not in box.informativeText():
+                failures.append(f"The Remove prompt says {box.text()!r} / {box.informativeText()!r}")
+            if box.defaultButton() != box.button(no_button):
+                failures.append("The Remove prompt does not default to No")
+        except Exception as err:  # noqa: BLE001  # Anything escaping would leave the modal prompt open forever.
+            failures.append(repr(err))
+        box.button(no_button).click()
+
+    def drive_dialog() -> None:
+        """Drives the Manage Videos dialog (runs from a timer inside its modal loop) and accepts it."""
+        dialog = window.findChild(ballroom_scribe.gui.ManageVideosDialog)
+        if dialog is None:
+            failures.append("Manage Videos… did not open its dialog")
+            return
+        try:
+            items = dialog.findChild(QtWidgets.QListWidget)
+            _expect(items is not None, "The dialog has no list of videos")
+            assert items is not None
+            texts = [items.item(index).text() for index in range(items.count())]
+            _expect(
+                texts == ["smoke_clip.mp4  —  2 rows", "smoke_clip_b.mp4  —  1 row"] and items.currentRow() == 0,
+                f"The dialog lists {texts} with row {items.currentRow()} current",
+            )
+            remove_button = next((b for b in dialog.findChildren(QtWidgets.QToolButton) if b.text() == "Remove"), None)
+            _expect(remove_button is not None, "The dialog has no Remove button")
+            assert remove_button is not None
+            QtCore.QTimer.singleShot(0, answer_remove_prompt)
+            remove_button.click()
+            _expect(
+                dialog.order() == (clip, second_clip) and dialog.removed() == (),
+                "Answering No to the Remove prompt still removed the video",
+            )
+            dialog.move_selected(1)
+            _expect(dialog.order() == (second_clip, clip), f"Moving the first video down gave {dialog.order()}")
+        except Exception as err:  # noqa: BLE001  # Anything escaping would leave the modal dialog open forever.
+            failures.append(str(err) if isinstance(err, _SmokeTestError) else repr(err))
+            dialog.reject()
+            return
+        dialog.accept()
+
+    QtCore.QTimer.singleShot(0, drive_dialog)
+    manage_action.trigger()
+    fixture.app.processEvents()
+    _expect(not failures, "; ".join(failures))
+    _expect(order() == [second_clip, clip] and dropdown() == [second_clip, clip], f"Video order is {order()}")
+    expect_rows([row_b, first_a, second_a], "after reordering the videos")
+    _expect(model.undo_stack.undoText() == "Reorder Videos", f"Undo text is {model.undo_stack.undoText()!r}")
+    _expect(video_combo.currentData() == clip, f"The drop-down switched to {video_combo.currentText()!r}")
+    _expect_source(fixture, fixture.clip, "after reordering the videos")
+    _expect(
+        abs(player.position_seconds() - second_a.inpoint_seconds) < 1e-3,
+        f"Reordering moved the playhead to {player.position_seconds():.3f} s",
+    )
+    _expect(view.currentIndex().row() == 2, f"Current row {view.currentIndex().row()} did not follow the regrouping")
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+    _expect(order() == [clip, second_clip] and dropdown() == [clip, second_clip], f"Order after undo: {order()}")
+    expect_rows(original_records, "after undoing the reorder")
+    model.undo_stack.redo()
+    fixture.app.processEvents()
+    _expect(order() == [second_clip, clip], f"Order after redo: {order()}")
+    expect_rows([row_b, first_a, second_a], "after redoing the reorder")
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+
+    # 4. Removing the active video deletes its rows, switches the player to the first remaining video, and is one
+    # `Remove Video` undo step that brings the video, its drop-down slot, and its rows back.
+    window.select_video(second_clip)
+    fixture.app.processEvents()
+    _expect_source(fixture, fixture.second_clip, "after selecting the second clip")
+    dialog = session_dialog()
+    dialog.remove_selected()
+    _expect(
+        dialog.removed() == (second_clip,) and dialog.order() == (clip,),
+        f"Removing the current entry gave order {dialog.order()} and removed {dialog.removed()}",
+    )
+    window.apply_video_changes(dialog.order(), dialog.removed())
+    fixture.app.processEvents()
+    _expect(
+        order() == [clip] and dropdown() == [clip] and session.get(second_clip) is None,
+        f"Videos after removal: {order()}",
+    )
+    expect_rows([first_a, second_a], "after removing the second clip")
+    _expect(model.undo_stack.undoText() == "Remove Video", f"Undo text is {model.undo_stack.undoText()!r}")
+    _expect_source(fixture, fixture.clip, "after removing the active video")
+    _expect(manage_action.isEnabled(), "Manage Videos… is disabled with one video left")
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+    _expect(order() == [clip, second_clip] and dropdown() == [clip, second_clip], f"Order after undo: {order()}")
+    expect_rows(original_records, "after undoing the removal")
+    _expect(
+        isinstance(session.get(second_clip), ballroom_scribe.gui.models.LoadedVideo),
+        "Undo did not restore the removed video as a loaded video",
+    )
+    model.undo_stack.redo()
+    fixture.app.processEvents()
+    _expect(order() == [clip], f"Order after redo: {order()}")
+    expect_rows([first_a, second_a], "after redoing the removal")
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+    expect_rows(original_records, "after undoing the removal again")
+
+    model.set_records(original_records)
+    view.setCurrentIndex(model.index(0, int(col.LEVEL)))
+    fixture.app.processEvents()
+    _expect(model.undo_stack.isClean(), "Undo stack not clean after restoring original records")
+
+
 def _check_offline_videos(fixture: _Fixture) -> None:
     """Videos a CSV refers to but cannot open stay in the drop-down as offline entries until they are relinked."""
     window = fixture.window
@@ -2713,6 +2959,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Select several rows, delete them, and keep Set Inpoint to one row", _check_multi_row_selection),
         ("Go to Event and move between rows with Alt", _check_go_to_event_and_alt_navigation),
         ("Find and replace across rows and columns", _check_find_and_replace),
+        ("Manage videos and repair the row order", _check_manage_videos),
         ("Edit comments as icons and as text", _check_comment_column),
         ("Save CSV and reload it", _check_save_round_trip),
         ("Keep an offline video in the drop-down", _check_offline_videos),

@@ -362,6 +362,14 @@ class FindReplaceBar(QtWidgets.QWidget):
         self._active_match = None
         self.refresh_matches()
 
+    def on_rows_reordered(self) -> None:
+        """Refreshes matches after the rows were rearranged wholesale (pinned rows follow their records).
+
+        The active match is a `(row, column)` pair that no longer means the same cell, so stepping starts afresh.
+        """
+        self._active_match = None
+        self.refresh_matches()
+
     @override
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
         if event.type() == QtCore.QEvent.Type.KeyPress:

@@ -653,6 +653,101 @@ class TestRemoveRecords(unittest.TestCase):
         self.assertEqual(removed_rows, [3, 1])
 
 
+class TestReorderRows(unittest.TestCase):
+    """Unit tests for `EventTableModel.reorder_rows`."""
+
+    def setUp(self):
+        self.model = ballroom_scribe.gui.EventTableModel()
+        self.initial_records = [
+            TestRowAtOrBefore._event(_VIDEO_A, 30.0),
+            TestRowAtOrBefore._event(_VIDEO_B, 5.0),
+            TestRowAtOrBefore._event(_VIDEO_A, 10.0),
+        ]
+        self.model.set_records(self.initial_records)
+
+    def _records_in_order(self, order: tuple[int, ...]) -> list[ballroom_scribe.models.EventRecord]:
+        return [self.initial_records[row] for row in order]
+
+    def test_applies_the_permutation_as_one_undo_step(self):
+        moved = self.model.reorder_rows((2, 1, 0), "Sort Rows by Inpoint")
+
+        self.assertTrue(moved)
+        self.assertEqual(self.model.records, self._records_in_order((2, 1, 0)))
+        self.assertEqual(self.model.undo_stack.count(), 1)
+        self.assertEqual(self.model.undo_stack.undoText(), "Sort Rows by Inpoint")
+
+        self.model.undo_stack.undo()
+        self.assertEqual(self.model.records, self.initial_records)
+        self.assertTrue(self.model.undo_stack.isClean())
+
+        self.model.undo_stack.redo()
+        self.assertEqual(self.model.records, self._records_in_order((2, 1, 0)))
+
+    def test_undo_inverts_a_cyclic_permutation(self):
+        # Applying `(1, 2, 0)` twice would not restore the original order, so undo must use the inverse.
+        self.model.reorder_rows((1, 2, 0), "Group Rows by Video")
+        self.assertEqual(self.model.records, self._records_in_order((1, 2, 0)))
+
+        self.model.undo_stack.undo()
+
+        self.assertEqual(self.model.records, self.initial_records)
+
+    def test_identity_order_moves_nothing_and_pushes_nothing(self):
+        self.assertFalse(self.model.reorder_rows((0, 1, 2), "Group Rows by Video"))
+
+        self.assertEqual(self.model.records, self.initial_records)
+        self.assertEqual(self.model.undo_stack.count(), 0)
+        self.assertTrue(self.model.undo_stack.isClean())
+
+    @parameterized.expand(
+        [
+            param("too_few_rows", order=(1, 0)),
+            param("repeated_row", order=(0, 0, 1)),
+            param("out_of_range_row", order=(0, 1, 3)),
+        ]
+    )
+    def test_rejects_a_non_permutation_before_changing_anything(self, _, order: tuple[int, ...]):
+        with self.assertRaises(ValueError):
+            self.model.reorder_rows(order, "Group Rows by Video")
+
+        self.assertEqual(self.model.records, self.initial_records)
+        self.assertEqual(self.model.undo_stack.count(), 0)
+
+    def test_moves_rows_as_one_layout_change_with_a_vertical_sort_hint(self):
+        signature = "QList<QPersistentModelIndex>,QAbstractItemModel::LayoutChangeHint"
+        layout_signals: list[tuple[str, QtCore.QAbstractItemModel.LayoutChangeHint]] = []
+        self.model.layoutAboutToBeChanged[signature].connect(
+            lambda _parents, hint: layout_signals.append(("about", hint))
+        )
+        self.model.layoutChanged[signature].connect(lambda _parents, hint: layout_signals.append(("changed", hint)))
+        row_signals: list[str] = []
+        self.model.rowsInserted.connect(lambda *_: row_signals.append("inserted"))
+        self.model.rowsRemoved.connect(lambda *_: row_signals.append("removed"))
+        self.model.rowsMoved.connect(lambda *_: row_signals.append("moved"))
+        self.model.modelReset.connect(lambda: row_signals.append("reset"))
+
+        self.model.reorder_rows((2, 1, 0), "Sort Rows by Inpoint")
+
+        vertical = QtCore.QAbstractItemModel.LayoutChangeHint.VerticalSortHint
+        self.assertEqual(layout_signals, [("about", vertical), ("changed", vertical)])
+        self.assertEqual(row_signals, [])
+
+    def test_persistent_indexes_follow_their_records(self):
+        moved = QtCore.QPersistentModelIndex(self.model.index(0, 3))
+        untouched = QtCore.QPersistentModelIndex(self.model.index(1, 2))
+
+        self.model.reorder_rows((2, 1, 0), "Sort Rows by Inpoint")
+
+        self.assertEqual((moved.row(), moved.column()), (2, 3))
+        self.assertEqual((untouched.row(), untouched.column()), (1, 2))
+        self.assertEqual(self.model.record_at(moved.row()), self.initial_records[0])
+
+        self.model.undo_stack.undo()
+
+        self.assertEqual(moved.row(), 0)
+        self.assertEqual(untouched.row(), 1)
+
+
 class TestRowAtOrBefore(unittest.TestCase):
     """Unit tests for `EventTableModel.row_at_or_before`."""
 

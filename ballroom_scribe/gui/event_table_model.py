@@ -15,6 +15,9 @@ import ballroom_scribe.models
 import ballroom_scribe.utils
 
 _INVALID_INDEX = QtCore.QModelIndex()
+# PySide6 binds the bare `layoutAboutToBeChanged` / `layoutChanged` names to their argument-less overloads, so the
+# overload carrying a `LayoutChangeHint` has to be picked by signature.
+_LAYOUT_CHANGE_SIGNATURE = "QList<QPersistentModelIndex>,QAbstractItemModel::LayoutChangeHint"
 
 
 class _ReplaceRecordCommand(QtGui.QUndoCommand):
@@ -105,6 +108,24 @@ class _RemoveRecordCommand(QtGui.QUndoCommand):
     @override
     def undo(self) -> None:
         self._model._apply_insert(self._row, self._record)
+
+
+class _ReorderRowsCommand(QtGui.QUndoCommand):
+    """Undoable rearrangement of every row, e.g. grouping the table by video or sorting a video's rows."""
+
+    def __init__(self, model: EventTableModel, order: Sequence[int], description: str) -> None:
+        super().__init__(description)
+        self._model = model
+        self._order = tuple(order)
+        self._inverse = tuple(sorted(range(len(self._order)), key=self._order.__getitem__))
+
+    @override
+    def redo(self) -> None:
+        self._model._apply_order(self._order)
+
+    @override
+    def undo(self) -> None:
+        self._model._apply_order(self._inverse)
 
 
 def _column_text_value(record: ballroom_scribe.models.EventRecord, column: EventTableModel.Column) -> str:
@@ -585,6 +606,30 @@ class EventTableModel(QtCore.QAbstractTableModel):
         """Removes the record at `row` as an undoable command."""
         self.remove_records((row,))
 
+    def reorder_rows(self, order: Sequence[int], description: str) -> bool:
+        """Rearranges the rows so that row `i` holds the record now at `order[i]`, as one undoable command.
+
+        The rows move as a layout change, so persistent indexes (the selection, the current row, the row the
+        user is on, pinned Find rows) keep pointing at their records.
+
+        Args:
+            order: A permutation of the row indices, e.g. from `group_rows_by_video` or `sort_rows_by_inpoint`.
+            description: The undo step's name.
+
+        Returns:
+            Whether any row moved; the identity order pushes nothing onto the undo stack.
+
+        Raises:
+            ValueError: If `order` is not a permutation of the row indices.
+        """
+        permutation = tuple(order)
+        if sorted(permutation) != list(range(len(self._records))):
+            raise ValueError(f"{permutation} is not a permutation of {len(self._records)} row indices.")
+        if permutation == tuple(range(len(self._records))):
+            return False
+        self._undo_stack.push(_ReorderRowsCommand(self, permutation, description))
+        return True
+
     def unique_values(
         self,
         column: Column | int,
@@ -893,6 +938,22 @@ class EventTableModel(QtCore.QAbstractTableModel):
             return
         self._records.insert(to_row, self._records.pop(from_row))
         self.endMoveRows()
+
+    def _apply_order(self, order: Sequence[int]) -> None:
+        """Rearranges the rows so that row `i` holds the record now at `order[i]`, as a layout change."""
+        hint = QtCore.QAbstractItemModel.LayoutChangeHint.VerticalSortHint
+        self.layoutAboutToBeChanged[_LAYOUT_CHANGE_SIGNATURE].emit([], hint)
+        old_indexes = self.persistentIndexList()
+        new_row = {old: new for new, old in enumerate(order)}
+        self._records = [self._records[old] for old in order]
+        self.changePersistentIndexList(
+            old_indexes,
+            [
+                self.index(new_row[index.row()], index.column()) if index.isValid() else QtCore.QModelIndex()
+                for index in old_indexes
+            ],
+        )
+        self.layoutChanged[_LAYOUT_CHANGE_SIGNATURE].emit([], hint)
 
     def _apply_insert(self, row: int, record: ballroom_scribe.models.EventRecord) -> None:
         self.beginInsertRows(QtCore.QModelIndex(), row, row)

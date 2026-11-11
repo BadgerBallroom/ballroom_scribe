@@ -3,6 +3,7 @@
 import dataclasses
 import pathlib
 import re
+from collections.abc import Sequence
 from typing import TypeIs
 
 import ballroom_scribe.cli.arguments
@@ -187,6 +188,29 @@ class VideoSession:
             (entry.csv_file if key == csv_file else key): (entry if key == csv_file else value)
             for key, value in self._videos.items()
         }
+
+    def reorder(self, order: Sequence[pathlib.Path]) -> None:
+        """Reorders the videos so those keyed by `order` come first, in that order.
+
+        Videos missing from `order` keep their relative order after the listed ones; paths in `order` that are not
+        in the session are ignored, so a remembered order stays usable after videos were added or removed.
+        """
+        listed = [csv_file for csv_file in dict.fromkeys(order) if csv_file in self._videos]
+        listed_keys = set(listed)
+        rest = [csv_file for csv_file in self._videos if csv_file not in listed_keys]
+        self._videos = {csv_file: self._videos[csv_file] for csv_file in (*listed, *rest)}
+
+    def insert(self, index: int, video: ballroom_scribe.gui.models.SessionVideo) -> None:
+        """Puts `video` (loaded or offline) back at `index`, e.g. when undoing its removal.
+
+        Raises:
+            ValueError: If `video.csv_file` is already in the session.
+        """
+        if video.csv_file in self._videos:
+            raise ValueError(f"Video {video.csv_file} is already in the session.")
+        entries = list(self._videos.items())
+        entries.insert(max(0, min(index, len(entries))), (video.csv_file, video))
+        self._videos = dict(entries)
 
     def offline_match(self, video_path: pathlib.Path) -> ballroom_scribe.gui.models.OfflineVideo | None:
         """Returns the offline entry whose expected file has `video_path`'s name, if exactly one does."""

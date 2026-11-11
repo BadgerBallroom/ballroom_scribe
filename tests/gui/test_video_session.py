@@ -254,6 +254,80 @@ class TestOfflineVideos(unittest.TestCase):
         self.assertIsNone(self.session.find_for_record(pathlib.Path("part9.mp4")))
 
 
+class TestReorderAndInsert(unittest.TestCase):
+    """Unit tests for `VideoSession.reorder` and `VideoSession.insert`."""
+
+    def setUp(self):
+        self.enterContext(patch.object(pathlib.Path, "resolve", autospec=True, side_effect=_fake_resolve))
+        self.enterContext(patch.object(ballroom_scribe.utils, "count_audio_channels", autospec=True, return_value=2))
+        self.session = ballroom_scribe.gui.VideoSession()
+        self.first = self.session.add(
+            input_video=pathlib.Path("videos/part1.mp4"),
+            input_channel=0,
+            parent_cache_dir=pathlib.Path("videos"),
+        )
+        self.offline = self.session.add_offline(
+            pathlib.Path("part2.mp4"),
+            pathlib.Path("/comp/part2.mp4"),
+            "File not found",
+        )
+        self.third = self.session.add(
+            input_video=pathlib.Path("videos/part3.mp4"),
+            input_channel=1,
+            parent_cache_dir=pathlib.Path("videos"),
+        )
+
+    def test_reorder_applies_a_full_order_and_inputs_follow(self):
+        self.session.reorder((self.third.csv_file, self.offline.csv_file, self.first.csv_file))
+
+        self.assertEqual(self.session.videos, (self.third, self.offline, self.first))
+        self.assertEqual(
+            [entry["input_video"] for entry in self.session.inputs()],
+            [self.third.input_video, self.first.input_video],
+        )
+
+    @parameterized.expand(
+        [
+            param("listed_videos_come_first_and_the_rest_keep_their_order", order=("part3",), expected=(2, 0, 1)),
+            param("unknown_paths_are_ignored", order=("missing", "part2", "part1"), expected=(1, 0, 2)),
+            param("duplicates_count_once", order=("part2", "part2", "part1"), expected=(1, 0, 2)),
+            param("empty_order_changes_nothing", order=(), expected=(0, 1, 2)),
+        ]
+    )
+    def test_reorder_tolerates_partial_orders(self, _, order: tuple[str, ...], expected: tuple[int, ...]):
+        videos = self.session.videos
+        keys = {"part1": self.first.csv_file, "part2": self.offline.csv_file, "part3": self.third.csv_file}
+
+        self.session.reorder(tuple(keys.get(name, pathlib.Path("missing.mp4")) for name in order))
+
+        self.assertEqual(self.session.videos, tuple(videos[index] for index in expected))
+
+    @parameterized.expand(
+        [
+            param("at_its_old_position", index=1, expected_position=1),
+            param("at_the_front", index=0, expected_position=0),
+            param("at_the_end", index=2, expected_position=2),
+            param("past_the_end_is_clamped", index=99, expected_position=2),
+            param("negative_is_clamped_to_the_front", index=-5, expected_position=0),
+        ]
+    )
+    def test_insert_puts_a_removed_video_back(self, _, index: int, expected_position: int):
+        self.session.remove(self.offline.csv_file)
+        self.assertEqual(self.session.videos, (self.first, self.third))
+
+        self.session.insert(index, self.offline)
+
+        self.assertEqual(self.session.videos[expected_position], self.offline)
+        self.assertEqual(len(self.session), 3)
+        self.assertEqual(self.session.get(self.offline.csv_file), self.offline)
+
+    def test_insert_rejects_a_video_already_in_the_session(self):
+        with self.assertRaisesRegex(ValueError, "already in the session"):
+            self.session.insert(0, self.offline)
+
+        self.assertEqual(self.session.videos, (self.first, self.offline, self.third))
+
+
 class TestInferChannel(unittest.TestCase):
     """Unit tests for `VideoSession.infer_channel`."""
 
