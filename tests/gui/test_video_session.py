@@ -6,6 +6,7 @@ from parameterized import param, parameterized
 
 import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
+import ballroom_scribe.gui.models
 import ballroom_scribe.utils
 
 
@@ -138,6 +139,119 @@ class TestVideoSession(unittest.TestCase):
         self.assertEqual(len(session), 1)
         session.clear()
         self.assertEqual(len(session), 0)
+
+
+class TestOfflineVideos(unittest.TestCase):
+    """Unit tests for `VideoSession`'s offline entries: `add_offline`, `replace`, `offline_match`, and `probe`."""
+
+    def setUp(self):
+        self.enterContext(patch.object(pathlib.Path, "resolve", autospec=True, side_effect=_fake_resolve))
+        self.mock_count_channels = self.enterContext(
+            patch.object(ballroom_scribe.utils, "count_audio_channels", autospec=True, return_value=2)
+        )
+        self.session = ballroom_scribe.gui.VideoSession()
+        self.loaded = self.session.add(
+            input_video=pathlib.Path("videos/part1.mp4"),
+            input_channel=0,
+            parent_cache_dir=pathlib.Path("videos"),
+        )
+        self.offline = self.session.add_offline(
+            pathlib.Path("part2.mp4"),
+            pathlib.Path("/comp/part2.mp4"),
+            "File not found",
+        )
+        self.mock_count_channels.reset_mock()
+
+    def test_add_offline_keeps_order_and_is_excluded_from_loaded_videos_and_inputs(self):
+        self.assertIsInstance(self.offline, ballroom_scribe.gui.models.OfflineVideo)
+        self.assertEqual(self.session.videos, (self.loaded, self.offline))
+        self.assertEqual(self.session.loaded_videos, (self.loaded,))
+        self.assertEqual(len(self.session), 2)
+        self.assertEqual(self.session.get(pathlib.Path("part2.mp4")), self.offline)
+        self.assertEqual([entry["input_video"] for entry in self.session.inputs()], [self.loaded.input_video])
+        self.mock_count_channels.assert_not_called()  # Offline entries never probe the file.
+
+        # Marking the same path offline again just updates the reason; a loaded key is refused.
+        updated = self.session.add_offline(pathlib.Path("part2.mp4"), pathlib.Path("/comp/part2.mp4"), "No audio")
+        self.assertEqual(self.session.videos, (self.loaded, updated))
+        with self.assertRaisesRegex(ValueError, "cannot be marked offline"):
+            self.session.add_offline(self.loaded.csv_file, self.loaded.input_video, "File not found")
+
+    def test_add_replaces_an_offline_entry_with_the_same_key_in_place(self):
+        relinked = self.session.add(
+            input_video=pathlib.Path("/comp/part2.mp4"),
+            input_channel=1,
+            parent_cache_dir=pathlib.Path("/comp"),
+            csv_file=pathlib.Path("part2.mp4"),
+        )
+
+        self.assertEqual(self.session.videos, (self.loaded, relinked))
+        self.assertEqual(self.session.loaded_videos, (self.loaded, relinked))
+        with self.assertRaisesRegex(ValueError, "already loaded"):
+            self.session.add(
+                input_video=pathlib.Path("/comp/part2.mp4"),
+                input_channel=1,
+                parent_cache_dir=pathlib.Path("/comp"),
+            )
+
+    def test_probe_validates_without_adding(self):
+        probed = self.session.probe(
+            pathlib.Path("/found/part2.mp4"),
+            1,
+            pathlib.Path("/found"),
+            csv_file=pathlib.Path("found/part2.mp4"),
+        )
+
+        self.assertEqual(probed.csv_file, pathlib.Path("found/part2.mp4"))
+        self.assertEqual(probed.input_video, pathlib.Path("/found/part2.mp4"))
+        self.assertEqual(probed.channel_count, 2)
+        self.assertEqual(self.session.videos, (self.loaded, self.offline))
+        with self.assertRaisesRegex(ValueError, "already loaded"):
+            self.session.probe(self.loaded.input_video, 0, pathlib.Path("elsewhere"))
+
+    def test_replace_swaps_entries_keeping_the_position_in_both_directions(self):
+        later = self.session.add_offline(pathlib.Path("part3.mp4"), pathlib.Path("/comp/part3.mp4"), "File not found")
+        found = self.session.probe(
+            pathlib.Path("/found/part2.mp4"),
+            0,
+            pathlib.Path("/found"),
+            csv_file=pathlib.Path("found/part2.mp4"),
+        )
+
+        self.session.replace(self.offline.csv_file, found)
+        self.assertEqual(self.session.videos, (self.loaded, found, later))
+        self.assertIsNone(self.session.get(pathlib.Path("part2.mp4")))
+        self.assertEqual(self.session.get(pathlib.Path("found/part2.mp4")), found)
+
+        self.session.replace(found.csv_file, self.offline)
+        self.assertEqual(self.session.videos, (self.loaded, self.offline, later))
+
+        with self.assertRaises(KeyError):
+            self.session.replace(pathlib.Path("missing.mp4"), found)
+        with self.assertRaisesRegex(ValueError, "already in the session"):
+            self.session.replace(later.csv_file, self.offline)
+
+    def test_offline_match_requires_exactly_one_offline_entry_with_that_name(self):
+        self.assertEqual(self.session.offline_match(pathlib.Path("/backup/part2.mp4")), self.offline)
+        self.assertIsNone(self.session.offline_match(pathlib.Path("/backup/part1.mp4")))  # Loaded, not offline.
+        self.assertIsNone(self.session.offline_match(pathlib.Path("/backup/part9.mp4")))
+
+        self.session.add_offline(pathlib.Path("other/part2.mp4"), pathlib.Path("/other/part2.mp4"), "File not found")
+        self.assertIsNone(self.session.offline_match(pathlib.Path("/backup/part2.mp4")))  # Ambiguous.
+
+    def test_channel_and_cache_dir_changes_reject_offline_entries(self):
+        with self.assertRaisesRegex(ValueError, "offline"):
+            self.session.set_channel(self.offline.csv_file, 0)
+        with self.assertRaisesRegex(ValueError, "offline"):
+            self.session.set_parent_cache_dir(self.offline.csv_file, pathlib.Path("alt_cache"))
+
+    def test_find_for_record_resolves_rows_to_offline_entries(self):
+        self.assertEqual(self.session.find_for_record(pathlib.Path("part2.mp4")), self.offline)
+        self.assertEqual(self.session.find_for_record(pathlib.Path("/elsewhere/part2.mp4")), self.offline)
+        self.assertEqual(
+            self.session.find_for_record(pathlib.Path("part2.mp4"), csv_dir=pathlib.Path("/comp")), self.offline
+        )
+        self.assertIsNone(self.session.find_for_record(pathlib.Path("part9.mp4")))
 
 
 class TestInferChannel(unittest.TestCase):

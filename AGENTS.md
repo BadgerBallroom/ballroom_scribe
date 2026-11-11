@@ -23,14 +23,17 @@
         `ballroom_scribe/gui/models/`, `ballroom_scribe/cli/arguments/`) may use
         relative imports (`from .word import Word`, `from .group_abc import
         Group, GroupArgs`) for sibling dependencies. A sibling symbol that a
-        module needs *while it is being imported* — above all a base class, such
-        as `CurrentCellDelegate` in `ballroom_scribe/gui/autocomplete_delegate.py`
-        — must also be imported this way (`from .current_cell_delegate import
-        CurrentCellDelegate`) rather than reached through the package
+        module needs *while it is being imported* — a base class, such as
+        `CurrentCellDelegate` in `ballroom_scribe/gui/autocomplete_delegate.py`,
+        or a default argument value, such as `RelinkPolicy.ASK` in
+        `ballroom_scribe/gui/main_window.py` — must also be imported this way
+        (`from .current_cell_delegate import CurrentCellDelegate`, `from .models
+        import RelinkPolicy`) rather than reached through the package
         (`ballroom_scribe.gui.CurrentCellDelegate`): under `EAGER_IMPORT=1` every
-        submodule is loaded while its package is still initializing, so the
-        package's own lazy exports do not resolve yet. Symbols used only inside
-        function bodies keep the qualified `ballroom_scribe.gui.<Symbol>` form.
+        submodule is loaded while its package is still initializing, so neither
+        the package's own lazy exports nor `ballroom_scribe.gui` itself resolve
+        yet. Symbols used only inside function bodies keep the qualified
+        `ballroom_scribe.gui.<Symbol>` form.
 *   **Lazy package exports (`lazy-loader`)**: Every package `__init__.py`
     contains only a module docstring, `import lazy_loader`, and
     `__getattr__, __dir__, __all__ = lazy_loader.attach_stub(__name__, __file__)`.

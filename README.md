@@ -218,6 +218,9 @@ including Qt multimedia backend diagnostics, to the console.
         for editing.
     *   **Delete Event** (<kbd>Ctrl</kbd> + <kbd>D</kbd>) deletes all selected rows
 *   **Comments**: The Comment column holds free-text notes for people reading the CSV.
+*   **Missing videos**: If a CSV references a video that cannot be opened (perhaps because it was moved or renamed), you
+    can still edit rows for that video. Use **File → Locate Video…** to relink. **Open Videos…** also offers to relink
+    when an opened file has the same name as an offline video. Relinking rewrites the rows' `File` values.
 
 ### Keyboard Shortcuts
 

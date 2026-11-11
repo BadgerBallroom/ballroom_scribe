@@ -85,6 +85,7 @@ class WaveformWidget(QtWidgets.QWidget):
         self._window_seconds: float = _DEFAULT_WINDOW_SECONDS
         self._status_message: str = "Open a video or CSV to view its audio waveform."
         self._is_error: bool = False
+        self._is_offline: bool = False
         self._markers: tuple[_Marker, ...] = ()
         self._selected_rows: frozenset[int] = frozenset()
 
@@ -127,6 +128,11 @@ class WaveformWidget(QtWidgets.QWidget):
     def is_error(self) -> bool:
         """Returns whether the status message describes a loading failure."""
         return self._is_error
+
+    @property
+    def is_offline(self) -> bool:
+        """Returns whether the widget shows that the active video's media is offline (see `set_offline`)."""
+        return self._is_offline
 
     @property
     def window_seconds(self) -> float:
@@ -172,6 +178,7 @@ class WaveformWidget(QtWidgets.QWidget):
         self._recenter_remaining_seconds = 0.0
         self._status_message = "Open a video or CSV to view its audio waveform."
         self._is_error = False
+        self._is_offline = False
         self.update()
 
     def set_loading(self, video_name: str) -> None:
@@ -187,6 +194,13 @@ class WaveformWidget(QtWidgets.QWidget):
         self._recenter_remaining_seconds = 0.0
         self._status_message = message
         self._is_error = False
+        self._is_offline = False
+        self.update()
+
+    def set_offline(self, video_name: str, reason: str) -> None:
+        """Shows that the active video's media is offline (missing or unreadable) instead of an envelope."""
+        self.set_status(f"{video_name} could not be opened ({reason}). Use File → Locate Video… to find it.")
+        self._is_offline = True
         self.update()
 
     def set_error(self, message: str) -> None:
@@ -198,6 +212,7 @@ class WaveformWidget(QtWidgets.QWidget):
         self._recenter_remaining_seconds = 0.0
         self._status_message = f"Waveform unavailable: {message}"
         self._is_error = True
+        self._is_offline = False
         self.update()
 
     def set_envelope(self, envelope: ballroom_scribe.gui.models.WaveformEnvelope) -> None:
@@ -212,6 +227,7 @@ class WaveformWidget(QtWidgets.QWidget):
         else:
             self._peak_amplitude = 1.0
         self._is_error = False
+        self._is_offline = False
         self.set_window_seconds(self._window_seconds)  # Re-clamps the span to the new clip's length.
         self.update()
 
@@ -305,10 +321,33 @@ class WaveformWidget(QtWidgets.QWidget):
             _paint_focus_frame(painter, rect)
 
     def _paint_status_text(self, painter: QtGui.QPainter, rect: QtCore.QRect) -> None:
+        area = rect.adjusted(12, 6, -12, -6)
+        if self._is_offline:
+            # Like an NLE's "media offline" slate: a bold headline over the detail text.
+            headline_font = QtGui.QFont(painter.font())
+            headline_font.setBold(True)
+            headline_font.setPointSize(headline_font.pointSize() + 4)
+            painter.setFont(headline_font)
+            painter.setPen(QtGui.QColor(255, 176, 60))
+            upper = QtCore.QRect(area.left(), area.top(), area.width(), area.height() // 2 - 2)
+            painter.drawText(
+                upper, QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignBottom, "MEDIA OFFLINE"
+            )
+            painter.setFont(self.font())
+            painter.setPen(QtGui.QColor(185, 192, 206))
+            lower = QtCore.QRect(area.left(), area.top() + area.height() // 2 + 2, area.width(), area.height() // 2 - 2)
+            painter.drawText(
+                lower,
+                QtCore.Qt.AlignmentFlag.AlignHCenter
+                | QtCore.Qt.AlignmentFlag.AlignTop
+                | QtCore.Qt.TextFlag.TextWordWrap,
+                self._status_message,
+            )
+            return
         color = QtGui.QColor(235, 110, 110) if self._is_error else QtGui.QColor(165, 172, 185)
         painter.setPen(color)
         painter.drawText(
-            rect.adjusted(12, 6, -12, -6),
+            area,
             QtCore.Qt.AlignmentFlag.AlignCenter | QtCore.Qt.TextFlag.TextWordWrap,
             self._status_message,
         )

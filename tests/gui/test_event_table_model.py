@@ -776,6 +776,63 @@ class TestRowEntered(unittest.TestCase):
         self.assertIsNone(self.model.row_entered(pathlib.Path("/videos/missing.mp4"), 0.0, 999.0))
 
 
+class TestRowsOfVideo(unittest.TestCase):
+    """Unit tests for `EventTableModel.rows_of_video`, `first_row_of_video`, and `relink_rows`."""
+
+    def setUp(self):
+        relative_a = pathlib.Path("part1.mp4")
+        ranks = {_VIDEO_A: 0, relative_a: 0, _VIDEO_B: 1}
+        self.model = ballroom_scribe.gui.EventTableModel(video_rank=ranks.get)
+        self.model.set_records(
+            [
+                TestRowAtOrBefore._event(_VIDEO_B, 5.0),
+                TestRowAtOrBefore._event(_VIDEO_A, 30.0),
+                TestRowAtOrBefore._event(relative_a, 10.0),
+                TestRowAtOrBefore._event(pathlib.Path("unloaded.mp4"), 1.0),
+                TestRowAtOrBefore._event(_VIDEO_A, 60.0),
+            ]
+        )
+
+    def test_rows_of_video_groups_relative_and_absolute_spellings_in_table_order(self):
+        self.assertEqual(self.model.rows_of_video(_VIDEO_A), (1, 2, 4))
+        self.assertEqual(self.model.rows_of_video(pathlib.Path("part1.mp4")), (1, 2, 4))
+        self.assertEqual(self.model.rows_of_video(_VIDEO_B), (0,))
+        self.assertEqual(self.model.rows_of_video(pathlib.Path("unloaded.mp4")), ())
+        self.assertEqual(self.model.first_row_of_video(_VIDEO_A), 1)
+        self.assertEqual(self.model.first_row_of_video(_VIDEO_B), 0)
+        self.assertIsNone(self.model.first_row_of_video(pathlib.Path("unloaded.mp4")))
+
+    def test_relink_rows_rewrites_only_the_given_rows_as_one_undo_step(self):
+        new_file = pathlib.Path("found/part1.mp4")
+        before = self.model.records
+
+        changed = self.model.relink_rows(self.model.rows_of_video(_VIDEO_A), new_file, "Locate Video")
+
+        self.assertEqual(changed, 3)
+        self.assertEqual(
+            [record.file for record in self.model.records],
+            [_VIDEO_B, new_file, new_file, pathlib.Path("unloaded.mp4"), new_file],
+        )
+        self.assertEqual([record.inpoint_seconds for record in self.model.records], [5.0, 30.0, 10.0, 1.0, 60.0])
+        self.assertEqual(self.model.undo_stack.count(), 1)
+        self.assertEqual(self.model.undo_stack.undoText(), "Locate Video")
+
+        self.model.undo_stack.undo()
+        self.assertEqual(self.model.records, before)
+        self.model.undo_stack.redo()
+        self.assertEqual(self.model.record_at(4).file, new_file)
+
+    def test_relink_rows_skips_rows_already_pointing_at_the_file_and_validates_rows(self):
+        self.assertEqual(self.model.relink_rows((1, 4), _VIDEO_A, "Locate Video"), 0)
+        self.assertEqual(self.model.undo_stack.count(), 0)
+        self.assertEqual(self.model.relink_rows((), pathlib.Path("x.mp4"), "Locate Video"), 0)
+
+        with self.assertRaises(IndexError):
+            self.model.relink_rows((1, 5), pathlib.Path("x.mp4"), "Locate Video")
+        self.assertEqual(self.model.record_at(1).file, _VIDEO_A)
+        self.assertTrue(self.model.undo_stack.isClean())
+
+
 class TestCommentDisplay(unittest.TestCase):
     """Unit tests for `EventTableModel.set_comment_display` and the `Comment` column's roles."""
 

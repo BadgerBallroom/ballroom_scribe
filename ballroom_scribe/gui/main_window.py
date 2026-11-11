@@ -1,5 +1,6 @@
 """Main window of the PySide6 Ballroom Scribe timestamp editor."""
 
+import logging
 import pathlib
 import subprocess
 from collections.abc import Sequence
@@ -14,6 +15,12 @@ import ballroom_scribe.gui.models
 import ballroom_scribe.gui.utils
 import ballroom_scribe.models
 
+# Imported directly rather than as `ballroom_scribe.gui.models.RelinkPolicy`: `add_videos` needs it for a default
+# argument value while this module is being imported, and under `EAGER_IMPORT=1` that happens before
+# `ballroom_scribe.gui` is reachable through the root package.
+from .models import RelinkPolicy
+
+_LOGGER = logging.getLogger(__name__)
 _VIDEO_FILE_FILTER = "Video Files (*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.mts *.m2ts);;All Files (*)"
 _CSV_FILE_FILTER = "CSV Files (*.csv);;All Files (*)"
 _MIN_FILE_COLUMN_WIDTH = 160
@@ -76,6 +83,67 @@ def _distribute_width(total: int, weights: Sequence[float]) -> list[int]:
     return widths
 
 
+def _locate_record_video(record_file: pathlib.Path, csv_dir: pathlib.Path) -> pathlib.Path | None:
+    """Returns where a CSV `File` path exists on disk: as given, or relative to the CSV's folder; else `None`."""
+    if record_file.exists():
+        return record_file
+    relative_candidate = csv_dir / record_file
+    if not record_file.is_absolute() and relative_candidate.exists():
+        return relative_candidate
+    return None
+
+
+def _expected_video_location(record_file: pathlib.Path, csv_dir: pathlib.Path) -> pathlib.Path:
+    """Returns where a CSV `File` path points: itself if absolute, else resolved against the CSV's folder."""
+    return record_file if record_file.is_absolute() else csv_dir / record_file
+
+
+def _relinked_csv_path(
+    old_csv_file: pathlib.Path,
+    located: pathlib.Path,
+    csv_dir: pathlib.Path | None,
+) -> pathlib.Path:
+    """Returns the `File` value to store once an offline video is found at `located`.
+
+    A relative `File` stays relative (to the CSV's folder) when the new location lies under that folder, so portable
+    project folders stay portable after a rename; otherwise the resolved absolute path is stored.
+    """
+    resolved = located.resolve()
+    if not old_csv_file.is_absolute() and csv_dir is not None:
+        try:
+            return resolved.relative_to(csv_dir.resolve())
+        except ValueError:
+            pass
+    return resolved
+
+
+class _RelinkVideoCommand(QtGui.QUndoCommand):
+    """Undoable swap of an offline session entry for the loaded video found for it, and back again.
+
+    Pushed together with the rows' `File` rewrite (see `MainWindow.locate_video`), so undoing the relink also takes
+    the media offline again and the table and the Video drop-down never disagree.
+    """
+
+    def __init__(
+        self,
+        window: MainWindow,
+        offline: ballroom_scribe.gui.models.OfflineVideo,
+        loaded: ballroom_scribe.gui.models.LoadedVideo,
+    ) -> None:
+        super().__init__("Locate Video")
+        self._window = window
+        self._offline = offline
+        self._loaded = loaded
+
+    @override
+    def redo(self) -> None:
+        self._window._apply_relink(self._offline.csv_file, self._loaded)
+
+    @override
+    def undo(self) -> None:
+        self._window._apply_relink(self._loaded.csv_file, self._offline)
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """Top-level window coordinating video playback, waveform display, event table editing, and pipeline runs."""
 
@@ -90,7 +158,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recorder = ballroom_scribe.EventRecorder()
         self._table_model = ballroom_scribe.gui.EventTableModel(self, video_rank=self._video_rank)
         self._waveform_loader = ballroom_scribe.gui.WaveformLoader(self)
-        self._active_video: ballroom_scribe.gui.models.LoadedVideo | None = None
+        self._active_video: ballroom_scribe.gui.models.SessionVideo | None = None
         self._current_csv: pathlib.Path | None = None
         self._updating_selector = False
         self._selecting_without_jump = False
@@ -137,6 +205,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setCentralWidget(root_splitter)
 
         self._video_combo = QtWidgets.QComboBox(self)
+        self._video_combo.setObjectName("videoCombo")
         self._video_combo.setMinimumWidth(220)
         self._video_combo.setEnabled(False)
         self._video_combo.currentIndexChanged.connect(self._on_video_combo_changed)
@@ -189,17 +258,46 @@ class MainWindow(QtWidgets.QMainWindow):
         """Returns the inline Find and Replace bar."""
         return self._find_replace_bar
 
-    def add_videos(self, inputs: Sequence[ballroom_scribe.cli.arguments.InputCacheArgs]) -> None:
-        """Adds one or more video inputs to the current session."""
+    def add_videos(
+        self,
+        inputs: Sequence[ballroom_scribe.cli.arguments.InputCacheArgs],
+        *,
+        relink_policy: RelinkPolicy = RelinkPolicy.ASK,
+    ) -> None:
+        """Adds one or more video inputs to the current session.
+
+        A file whose name matches an offline video (one the open CSV refers to but that could not be opened) is
+        handled by `relink_policy`: relinked into that entry, added as a separate video, or skipped. With
+        `RelinkPolicy.ASK` the user is prompted per file, and an "… All" answer settles the rest of `inputs`.
+        """
         if not inputs:
             return
+        policy = relink_policy
         added_any = False
         first_added_csv_file: pathlib.Path | None = None
 
-        for video_args in inputs:
+        for position, video_args in enumerate(inputs):
+            video_path = video_args["input_video"]
+            offline = self._session.offline_match(video_path)
+            if offline is not None:
+                choice = policy
+                if choice == RelinkPolicy.ASK:
+                    choice, for_rest = self._ask_relink_choice(video_path, offline, remaining=len(inputs) - position)
+                    if for_rest:
+                        policy = choice
+                if choice == RelinkPolicy.SKIP:
+                    continue
+                if choice == RelinkPolicy.RELINK:
+                    if self.locate_video(offline.csv_file, video_path):
+                        added_any = True
+                        if first_added_csv_file is None:
+                            relinked = self._session.find_for_record(video_path)
+                            first_added_csv_file = relinked.csv_file if relinked is not None else None
+                    continue
+
             try:
                 loaded = self._session.add(
-                    input_video=video_args["input_video"],
+                    input_video=video_path,
                     input_channel=video_args["input_channel"],
                     parent_cache_dir=video_args["cache_dir"],
                 )
@@ -207,7 +305,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 QtWidgets.QMessageBox.warning(
                     self,
                     "Could Not Load Video",
-                    f"Failed to load {video_args['input_video']}:\n{err}",
+                    f"Failed to load {video_path}:\n{err}",
                 )
                 continue
 
@@ -233,13 +331,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     10000,
                 )
 
-    def open_csv(
-        self,
-        csv_path: pathlib.Path,
-        *,
-        interactive_missing_videos: bool = True,
-    ) -> bool:
-        """Loads `csv_path` into the table and adds any referenced videos to the session."""
+    def open_csv(self, csv_path: pathlib.Path) -> bool:
+        """Loads `csv_path` into the table and adds any referenced videos to the session.
+
+        Videos that cannot be opened (missing, moved, unreadable, …) become offline entries in the Video drop-down
+        rather than prompting; see `locate_video` for bringing them back online.
+        """
         extra_columns: tuple[str, ...] = ()
 
         def capture_extra(columns: tuple[str, ...]) -> None:
@@ -267,16 +364,15 @@ class MainWindow(QtWidgets.QMainWindow):
         resolved_csv = csv_path.resolve()
         self._current_csv = resolved_csv
         self._table_model.set_records(records)
-        self._load_videos_referenced_by_records(
-            records,
-            csv_dir=resolved_csv.parent,
-            interactive=interactive_missing_videos,
-        )
+        offline_count = self._load_videos_referenced_by_records(records, csv_dir=resolved_csv.parent)
         self._resize_table_columns()
         self._refresh_waveform_markers()
         self._update_window_title()
         self._update_action_states()
-        self.statusBar().showMessage(f"Loaded {len(records)} event(s) from {resolved_csv.name}", 5000)
+        summary = f"Loaded {len(records)} event(s) from {resolved_csv.name}"
+        if offline_count:
+            summary += f" ({offline_count} video(s) offline)"
+        self.statusBar().showMessage(summary, 5000)
         return True
 
     def save_csv(self, target_path: pathlib.Path | None = None) -> bool:
@@ -321,11 +417,11 @@ class MainWindow(QtWidgets.QMainWindow):
     def set_selected_inpoint_to_playhead(self) -> None:
         """Overwrites the selected row's `File` and `Inpoint` with the active video and playhead.
 
-        Requires exactly one selected row; the bare `I` shortcut bypasses the action's enabled state, so the
-        method checks for itself and explains in the status bar otherwise.
+        Requires exactly one selected row and loaded media; the bare `I` shortcut bypasses the action's enabled
+        state, so the method checks for itself and explains in the status bar otherwise.
         """
         rows = self._table_view.selected_rows()
-        if self._active_video is None or not rows:
+        if not isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) or not rows:
             return
         if len(rows) > 1:
             self.statusBar().showMessage(f"Set Inpoint needs a single selected row; {len(rows)} are selected.", 5000)
@@ -341,8 +437,9 @@ class MainWindow(QtWidgets.QMainWindow):
         """Adds an event for the active video at the playhead and starts editing its `Level`.
 
         The row is placed among the active video's rows in `Inpoint` order (see `EventTableModel.add_record`).
+        Nothing happens while the active video is offline, since it has no playhead.
         """
-        if self._active_video is None:
+        if not isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo):
             return
         record = ballroom_scribe.models.EventRecord(
             file=self._active_video.csv_file,
@@ -391,6 +488,68 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_replace(self) -> None:
         """Shows the inline Find and Replace bar above the event table."""
         self._find_replace_bar.open_replace()
+
+    def select_video(self, csv_file: pathlib.Path) -> None:
+        """Activates the session video keyed by `csv_file`, as choosing it in the Video drop-down does.
+
+        The table scrolls to and highlights the video's first row, which becomes the row the user is on. A loaded
+        video opens at that row's `Inpoint`, or at `0:00` when it has no rows yet; an offline video shows a black
+        player and the waveform's "media offline" slate.
+        """
+        video = self._session.get(csv_file)
+        if video is None:
+            return
+        first_row = self._table_model.first_row_of_video(csv_file)
+        self._select_combo_entry(csv_file)
+        if video != self._active_video:
+            initial_seconds = self._table_model.record_at(first_row).inpoint_seconds if first_row is not None else None
+            self._activate_video(video, initial_seconds=initial_seconds)
+        if first_row is not None:
+            self._select_row_keeping_playhead(first_row)
+
+    def locate_video(self, csv_file: pathlib.Path, video_path: pathlib.Path) -> bool:
+        """Relinks the offline video keyed by `csv_file` to the media file `video_path`.
+
+        The entry keeps its place in the Video drop-down and the rows of that video get `video_path` as their `File`
+        (relative to the CSV when the old value was relative and the file lies under the CSV's folder). Rewriting the
+        rows and swapping the entry form one undo step, `Locate Video`; without rows the swap is immediate.
+
+        Returns:
+            Whether the video was relinked. A file that cannot be opened is reported in a dialog and nothing changes.
+        """
+        offline = self._session.get(csv_file)
+        if not isinstance(offline, ballroom_scribe.gui.models.OfflineVideo):
+            return False
+        csv_dir = self._current_csv.parent if self._current_csv else None
+        new_csv_file = _relinked_csv_path(csv_file, video_path, csv_dir)
+        parent_cache_dir = video_path.parent
+        try:
+            loaded = self._session.probe(
+                video_path,
+                ballroom_scribe.gui.VideoSession.infer_channel(video_path, parent_cache_dir),
+                parent_cache_dir,
+                csv_file=new_csv_file,
+            )
+        except (ValueError, subprocess.CalledProcessError, OSError) as err:
+            QtWidgets.QMessageBox.warning(self, "Could Not Load Video", f"Failed to load {video_path}:\n{err}")
+            return False
+
+        rows = self._table_model.rows_of_video(csv_file)
+        if not rows:
+            self._apply_relink(csv_file, loaded)
+        else:
+            stack = self._table_model.undo_stack
+            stack.beginMacro("Locate Video")
+            try:
+                stack.push(_RelinkVideoCommand(self, offline, loaded))
+                self._table_model.relink_rows(rows, new_csv_file, "Locate Video")
+            finally:
+                stack.endMacro()
+        self.statusBar().showMessage(
+            f"Located {video_path.name}; {len(rows)} row(s) now refer to {new_csv_file}.",
+            6000,
+        )
+        return True
 
     @override
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -514,6 +673,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_cache_dir_action = QtGui.QAction("Set Cache Directory…", self)
         self._set_cache_dir_action.triggered.connect(self._prompt_set_cache_dir)
 
+        self._locate_video_action = QtGui.QAction("Locate Video…", self)
+        _with_shortcut_hint(
+            self._locate_video_action,
+            "Find the media file of the offline video and update its rows' File paths",
+        )
+        self._locate_video_action.triggered.connect(self._prompt_locate_video)
+
         self._save_action = QtGui.QAction("Save", self)
         self._save_action.setShortcut(QtGui.QKeySequence.StandardKey.Save)
         self._save_action.triggered.connect(lambda: self.save_csv())
@@ -626,6 +792,7 @@ class MainWindow(QtWidgets.QMainWindow):
         file_menu.addAction(self._open_videos_action)
         file_menu.addAction(self._open_csv_action)
         file_menu.addAction(self._set_cache_dir_action)
+        file_menu.addAction(self._locate_video_action)
         file_menu.addSeparator()
         file_menu.addAction(self._save_action)
         file_menu.addAction(self._save_as_action)
@@ -788,7 +955,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.open_csv(pathlib.Path(selected))
 
     def _prompt_set_cache_dir(self) -> None:
-        if self._active_video is None:
+        if not isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo):
             return
         chosen = QtWidgets.QFileDialog.getExistingDirectory(
             self,
@@ -808,6 +975,75 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_video = updated
         self._start_waveform_load(updated)
         self.statusBar().showMessage(f"Cache directory set to {updated.cache_dir}", 5000)
+
+    def _prompt_locate_video(self) -> None:
+        offline = self._active_video
+        if not isinstance(offline, ballroom_scribe.gui.models.OfflineVideo):
+            return
+        if offline.input_video.parent.exists():
+            start_dir = offline.input_video.parent
+        elif self._current_csv is not None:
+            start_dir = self._current_csv.parent
+        else:
+            start_dir = pathlib.Path.home()
+        selected, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            f"Locate {offline.input_video.name}",
+            str(start_dir),
+            _VIDEO_FILE_FILTER,
+        )
+        if selected:
+            self.locate_video(offline.csv_file, pathlib.Path(selected))
+
+    def _ask_relink_choice(
+        self,
+        video_path: pathlib.Path,
+        offline: ballroom_scribe.gui.models.OfflineVideo,
+        *,
+        remaining: int,
+    ) -> tuple[RelinkPolicy, bool]:
+        """Asks whether an opened file should relink `offline`, be added separately, or be skipped.
+
+        Args:
+            video_path: The file being opened.
+            offline: The offline video with the same file name.
+            remaining: How many files of the batch are still to be handled, including `video_path`; when more than
+                one, "… All" buttons are offered that also answer for the rest.
+
+        Returns:
+            The choice, and whether it applies to the rest of the batch. `Esc` counts as skipping this file.
+        """
+        row_count = len(self._table_model.rows_of_video(offline.csv_file))
+        box = QtWidgets.QMessageBox(self)
+        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setWindowTitle("Relink Offline Video?")
+        box.setText(f"{video_path.name} has the same name as the offline video {offline.csv_file} ({offline.reason}).")
+        box.setInformativeText(
+            f"Relink it to that entry, rewriting the File path of its {row_count} row(s), or add it as a new video?"
+        )
+        choices: dict[QtWidgets.QAbstractButton, tuple[RelinkPolicy, bool]] = {}
+        relink_button = box.addButton("Relink", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        choices[relink_button] = (RelinkPolicy.RELINK, False)
+        choices[box.addButton("Add as New", QtWidgets.QMessageBox.ButtonRole.ActionRole)] = (
+            RelinkPolicy.ADD_NEW,
+            False,
+        )
+        skip_button = box.addButton("Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        choices[skip_button] = (RelinkPolicy.SKIP, False)
+        if remaining > 1:
+            choices[box.addButton("Relink All", QtWidgets.QMessageBox.ButtonRole.AcceptRole)] = (
+                RelinkPolicy.RELINK,
+                True,
+            )
+            choices[box.addButton("Add All as New", QtWidgets.QMessageBox.ButtonRole.ActionRole)] = (
+                RelinkPolicy.ADD_NEW,
+                True,
+            )
+            choices[box.addButton("Skip All", QtWidgets.QMessageBox.ButtonRole.RejectRole)] = (RelinkPolicy.SKIP, True)
+        box.setDefaultButton(relink_button)
+        box.setEscapeButton(skip_button)
+        box.exec()
+        return choices.get(box.clickedButton(), (RelinkPolicy.SKIP, False))
 
     def _save_csv_as(self) -> bool:
         if self._current_csv is not None:
@@ -832,10 +1068,15 @@ class MainWindow(QtWidgets.QMainWindow):
         records: Sequence[ballroom_scribe.models.EventRecord],
         *,
         csv_dir: pathlib.Path,
-        interactive: bool,
-    ) -> None:
+    ) -> int:
+        """Adds the videos `records` refer to, as loaded videos or offline entries; returns how many are offline.
+
+        The first video that opened becomes active (the first offline one if none did) unless a video already is.
+        """
         seen_files: set[pathlib.Path] = set()
-        first_matched: pathlib.Path | None = None
+        first_loaded: pathlib.Path | None = None
+        first_offline: pathlib.Path | None = None
+        offline_count = 0
 
         for record in records:
             if record.file in seen_files:
@@ -844,12 +1085,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
             existing = self._session.find_for_record(record.file, csv_dir=csv_dir)
             if existing is not None:
-                if first_matched is None:
-                    first_matched = existing.csv_file
+                if isinstance(existing, ballroom_scribe.gui.models.LoadedVideo):
+                    first_loaded = first_loaded if first_loaded is not None else existing.csv_file
+                else:
+                    first_offline = first_offline if first_offline is not None else existing.csv_file
                 continue
 
-            disk_path = self._resolve_record_video_on_disk(record.file, csv_dir=csv_dir, interactive=interactive)
+            disk_path = _locate_record_video(record.file, csv_dir)
             if disk_path is None:
+                expected = _expected_video_location(record.file, csv_dir)
+                self._session.add_offline(record.file, expected, "File not found")
+                _LOGGER.warning("Video %s referenced by the CSV was not found at %s", record.file, expected)
+                offline_count += 1
+                first_offline = first_offline if first_offline is not None else record.file
                 continue
 
             parent_cache_dir = disk_path.parent
@@ -862,52 +1110,21 @@ class MainWindow(QtWidgets.QMainWindow):
                     csv_file=record.file,
                 )
             except (ValueError, subprocess.CalledProcessError, OSError) as err:
-                QtWidgets.QMessageBox.warning(
-                    self,
-                    "Could Not Load Video",
-                    f"Failed to load {disk_path}:\n{err}",
-                )
+                self._session.add_offline(record.file, disk_path, str(err))
+                _LOGGER.warning("Video %s referenced by the CSV could not be opened: %s", disk_path, err)
+                offline_count += 1
+                first_offline = first_offline if first_offline is not None else record.file
                 continue
 
-            if first_matched is None:
-                first_matched = loaded.csv_file
+            if first_loaded is None:
+                first_loaded = loaded.csv_file
 
-        target_selection = self._active_video.csv_file if self._active_video else first_matched
+        if self._active_video is not None:
+            target_selection = self._active_video.csv_file
+        else:
+            target_selection = first_loaded if first_loaded is not None else first_offline
         self._rebuild_video_combo(select_csv_file=target_selection)
-
-    def _resolve_record_video_on_disk(
-        self,
-        record_file: pathlib.Path,
-        *,
-        csv_dir: pathlib.Path,
-        interactive: bool,
-    ) -> pathlib.Path | None:
-        if record_file.exists():
-            return record_file
-        relative_candidate = csv_dir / record_file
-        if not record_file.is_absolute() and relative_candidate.exists():
-            return relative_candidate
-        if not interactive:
-            return None
-
-        box = QtWidgets.QMessageBox(self)
-        box.setIcon(QtWidgets.QMessageBox.Icon.Question)
-        box.setWindowTitle("Missing Video File")
-        box.setText(f"Could not find video referenced by CSV:\n{record_file}")
-        locate_button = box.addButton("Locate Video…", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Skip", QtWidgets.QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-
-        if box.clickedButton() is locate_button:
-            located, _ = QtWidgets.QFileDialog.getOpenFileName(
-                self,
-                f"Locate {record_file.name}",
-                str(csv_dir),
-                _VIDEO_FILE_FILTER,
-            )
-            if located:
-                return pathlib.Path(located)
-        return None
+        return offline_count
 
     def _rebuild_video_combo(self, *, select_csv_file: pathlib.Path | None) -> None:
         self._updating_selector = True
@@ -923,8 +1140,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 label = video.input_video.name
                 if name_counts[label] > 1:
                     label = f"{label} ({video.input_video.parent.name})"
+                tooltip = str(video.input_video)
+                if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
+                    label = f"{label} (offline)"
+                    tooltip = f"{tooltip}\nOffline: {video.reason}"
                 self._video_combo.addItem(label, video.csv_file)
-                self._video_combo.setItemData(index, str(video.input_video), QtCore.Qt.ItemDataRole.ToolTipRole)
+                self._video_combo.setItemData(index, tooltip, QtCore.Qt.ItemDataRole.ToolTipRole)
                 if select_csv_file is not None and video.csv_file == select_csv_file:
                     selected_index = index
 
@@ -945,9 +1166,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self._active_video = None
             self._channel_spin.setEnabled(False)
 
+    def _select_combo_entry(self, csv_file: pathlib.Path) -> None:
+        """Shows `csv_file`'s entry in the Video drop-down without treating it as a user selection.
+
+        `QComboBox.findData` compares Python objects by identity, so the entries are searched by path equality.
+        """
+        self._updating_selector = True
+        try:
+            for index in range(self._video_combo.count()):
+                if self._video_combo.itemData(index) == csv_file:
+                    self._video_combo.setCurrentIndex(index)
+                    break
+        finally:
+            self._updating_selector = False
+
     def _activate_video(
         self,
-        video: ballroom_scribe.gui.models.LoadedVideo,
+        video: ballroom_scribe.gui.models.SessionVideo,
         *,
         initial_seconds: float | None = None,
         preserve_playing: bool = False,
@@ -955,18 +1190,39 @@ class MainWindow(QtWidgets.QMainWindow):
         self._active_video = video
 
         self._channel_spin.blockSignals(True)
-        self._channel_spin.setRange(0, max(0, video.channel_count - 1))
-        self._channel_spin.setValue(video.input_channel)
-        self._channel_spin.setEnabled(video.channel_count > 1)
+        if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
+            self._channel_spin.setRange(0, 0)
+            self._channel_spin.setEnabled(False)
+        else:
+            self._channel_spin.setRange(0, max(0, video.channel_count - 1))
+            self._channel_spin.setValue(video.input_channel)
+            self._channel_spin.setEnabled(video.channel_count > 1)
         self._channel_spin.blockSignals(False)
 
         self._waveform.recenter_playhead()
-        self._player.set_source(
-            video.input_video,
-            initial_seconds=initial_seconds,
-            preserve_playing=preserve_playing,
-        )
-        self._start_waveform_load(video)
+        if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
+            self._player.set_source(None)  # A black player and disabled transport, like an NLE's offline clip.
+            self._waveform.set_offline(video.input_video.name, video.reason)
+        else:
+            self._player.set_source(
+                video.input_video,
+                initial_seconds=initial_seconds,
+                preserve_playing=preserve_playing,
+            )
+            self._start_waveform_load(video)
+        self._refresh_waveform_markers()
+        self._update_action_states()
+
+    def _apply_relink(self, old_key: pathlib.Path, entry: ballroom_scribe.gui.models.SessionVideo) -> None:
+        """Swaps the session entry keyed by `old_key` for `entry`, re-activating it if it was the active video."""
+        was_active = self._active_video is not None and self._active_video.csv_file == old_key
+        self._session.replace(old_key, entry)
+        if was_active:
+            self._active_video = None  # Makes `_rebuild_video_combo` activate the swapped-in entry.
+            select = entry.csv_file
+        else:
+            select = self._active_video.csv_file if self._active_video is not None else entry.csv_file
+        self._rebuild_video_combo(select_csv_file=select)
         self._refresh_waveform_markers()
         self._update_action_states()
 
@@ -979,12 +1235,13 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         csv_file = self._video_combo.itemData(index)
         if isinstance(csv_file, pathlib.Path):
-            video = self._session.get(csv_file)
-            if video is not None and video != self._active_video:
-                self._activate_video(video)
+            self.select_video(csv_file)
 
     def _on_channel_spin_changed(self, channel: int) -> None:
-        if self._active_video is None or channel == self._active_video.input_channel:
+        if (
+            not isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo)
+            or channel == self._active_video.input_channel
+        ):
             return
         updated = self._session.set_channel(self._active_video.csv_file, channel)
         self._active_video = updated
@@ -1154,19 +1411,16 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         if self._active_video != matched_video:
-            self._updating_selector = True
-            try:
-                combo_idx = self._video_combo.findData(matched_video.csv_file)
-                if combo_idx >= 0:
-                    self._video_combo.setCurrentIndex(combo_idx)
-            finally:
-                self._updating_selector = False
-            self._activate_video(
-                matched_video,
-                initial_seconds=record.inpoint_seconds,
-                preserve_playing=True,
-            )
-        else:
+            self._select_combo_entry(matched_video.csv_file)
+            if isinstance(matched_video, ballroom_scribe.gui.models.OfflineVideo):
+                self._activate_video(matched_video)  # No media to seek; the row is simply shown as current.
+            else:
+                self._activate_video(
+                    matched_video,
+                    initial_seconds=record.inpoint_seconds,
+                    preserve_playing=True,
+                )
+        elif isinstance(matched_video, ballroom_scribe.gui.models.LoadedVideo):
             self._waveform.recenter_playhead()
             self._player.seek(record.inpoint_seconds)
 
@@ -1186,7 +1440,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.add_event_at_playhead()
 
     def _open_pipeline_dialog(self) -> None:
-        if not self._session:
+        if not self._session.loaded_videos:
             return
         dialog = ballroom_scribe.gui.PipelineDialog(
             inputs=self._session.inputs(),
@@ -1203,7 +1457,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _yield_extraction_to_pipeline(self) -> None:
         """Stops the GUI's extraction so the pipeline is the only writer of the cache files (see `atomic_path`)."""
         self._waveform_loader.shutdown()
-        if self._active_video is not None and self._waveform.envelope is None:
+        if isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) and self._waveform.envelope is None:
             name = self._active_video.input_video.name
             self._waveform.set_status(
                 f"The pipeline is extracting audio for {name}; the waveform will load when it finishes."
@@ -1215,7 +1469,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._reload_waveform_if_missing()
 
     def _reload_waveform_if_missing(self) -> None:
-        if self._active_video is not None and self._waveform.envelope is None:
+        if isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) and self._waveform.envelope is None:
             self._start_waveform_load(self._active_video)
 
     def _refresh_waveform_markers(self) -> None:
@@ -1260,20 +1514,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowTitle(f"{doc_name}[*] — Ballroom Scribe Timestamp Editor")
 
     def _update_action_states(self) -> None:
-        has_video = self._active_video is not None
+        # Offline videos have no media, so everything that needs a playhead waits until they are located.
+        has_media = isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo)
+        is_offline = isinstance(self._active_video, ballroom_scribe.gui.models.OfflineVideo)
         selected_rows = self._table_view.selected_rows()
-        self._set_cache_dir_action.setEnabled(has_video)
+        self._set_cache_dir_action.setEnabled(has_media)
+        self._locate_video_action.setEnabled(is_offline)
         self._go_to_event_action.setEnabled(len(selected_rows) == 1)
-        self._set_inpoint_action.setEnabled(has_video and len(selected_rows) == 1)
-        self._add_event_action.setEnabled(has_video)
+        self._set_inpoint_action.setEnabled(has_media and len(selected_rows) == 1)
+        self._add_event_action.setEnabled(has_media)
         self._delete_event_action.setEnabled(bool(selected_rows))
-        self._play_pause_action.setEnabled(has_video)
-        self._skip_back_action.setEnabled(has_video)
-        self._skip_forward_action.setEnabled(has_video)
-        self._zoom_in_action.setEnabled(has_video)
-        self._zoom_out_action.setEnabled(has_video)
-        self._reset_zoom_action.setEnabled(has_video)
-        self._run_pipeline_action.setEnabled(bool(self._session))
+        self._play_pause_action.setEnabled(has_media)
+        self._skip_back_action.setEnabled(has_media)
+        self._skip_forward_action.setEnabled(has_media)
+        self._zoom_in_action.setEnabled(has_media)
+        self._zoom_out_action.setEnabled(has_media)
+        self._reset_zoom_action.setEnabled(has_media)
+        self._run_pipeline_action.setEnabled(bool(self._session.loaded_videos))
 
     def _confirm_discard_or_save(self) -> bool:
         if self._table_model.undo_stack.isClean():

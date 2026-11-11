@@ -606,6 +606,61 @@ class EventTableModel(QtCore.QAbstractTableModel):
         """Returns the indices of all rows whose `file` equals `file`."""
         return tuple(index for index, record in enumerate(self._records) if record.file == file)
 
+    def rows_of_video(self, file: pathlib.Path) -> tuple[int, ...]:
+        """Returns the rows of `file`'s video in table order.
+
+        Rows belong to `file`'s video when `video_rank` gives them the same non-`None` rank as `file`, so relative
+        and absolute spellings of one video's path count alike. Returns `()` when `file` matches no video.
+        """
+        rank = self.video_rank
+        target_rank = rank(file)
+        if target_rank is None:
+            return ()
+        by_file: dict[pathlib.Path, int | None] = {file: target_rank}
+        rows: list[int] = []
+        for row, record in enumerate(self._records):
+            if record.file not in by_file:
+                by_file[record.file] = rank(record.file)
+            if by_file[record.file] == target_rank:
+                rows.append(row)
+        return tuple(rows)
+
+    def first_row_of_video(self, file: pathlib.Path) -> int | None:
+        """Returns the first row (in table order) of `file`'s video, or `None` when it has none."""
+        rows = self.rows_of_video(file)
+        return rows[0] if rows else None
+
+    def relink_rows(self, rows: Iterable[int], new_file: pathlib.Path, description: str) -> int:
+        """Rewrites the `File` of `rows` to `new_file` as one undoable command named `description`.
+
+        Used when an offline video's media is located elsewhere: the rows keep their order (the video keeps its
+        place in the session), only their `File` changes.
+
+        Returns:
+            The number of rows changed. Nothing is pushed onto the undo stack when that is zero.
+
+        Raises:
+            IndexError: If a row is out of range; nothing is changed then.
+        """
+        unique_rows = sorted(set(rows))
+        for row in unique_rows:
+            if not 0 <= row < len(self._records):
+                raise IndexError(f"Row index {row} out of range.")
+        replacements = [
+            (row, self._records[row], dataclasses.replace(self._records[row], file=new_file))
+            for row in unique_rows
+            if self._records[row].file != new_file
+        ]
+        if not replacements:
+            return 0
+        self._undo_stack.beginMacro(description)
+        try:
+            for row, old_record, new_record in replacements:
+                self._undo_stack.push(_ReplaceRecordCommand(self, row, old_record, new_record, description))
+        finally:
+            self._undo_stack.endMacro()
+        return len(replacements)
+
     def row_at_or_before(self, file: pathlib.Path, seconds: float) -> int | None:
         """Returns the row of `file`'s latest event with `inpoint_seconds <= seconds`, or `None` if none precedes it.
 

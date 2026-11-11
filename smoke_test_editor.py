@@ -25,6 +25,7 @@ from PySide6 import QtCore, QtGui, QtMultimedia, QtTest, QtWidgets
 import ballroom_scribe
 import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
+import ballroom_scribe.gui.models
 import ballroom_scribe.gui.utils
 
 _ML_MODULES = ("torch", "torchaudio", "faster_whisper", "ollama", "librosa")
@@ -384,7 +385,7 @@ def _check_csv_row_jump_renders_frames(fixture: _Fixture) -> None:
         f"{second_clip},{_SECOND_CLIP_ROW_SECONDS},0:00:03.25,Gold,Latin,Cha Cha,Final\n",
         encoding="utf-8",
     )
-    _expect(window.open_csv(initial_csv, interactive_missing_videos=False), "open_csv failed")
+    _expect(window.open_csv(initial_csv), "open_csv failed")
     _expect(window.table_model.rowCount() == _INITIAL_ROW_COUNT, "CSV rows were not loaded into the table")
     _expect(len(window.session) == 2, "Opening the CSV did not load the second video it references")
 
@@ -2443,6 +2444,230 @@ def _check_comment_column(fixture: _Fixture) -> None:
         _settle(fixture.app, 0.1)
 
 
+def _check_offline_videos(fixture: _Fixture) -> None:
+    """Videos a CSV refers to but cannot open stay in the drop-down as offline entries until they are relinked."""
+    window = fixture.window
+    view = window.table_view
+    viewport = view.viewport()
+    model = window.table_model
+    player = window.player
+    waveform = window.waveform
+    session = window.session
+    col = ballroom_scribe.gui.EventTableModel.Column
+    policy = ballroom_scribe.gui.models.RelinkPolicy
+    left = QtCore.Qt.MouseButton.LeftButton
+    clip = fixture.clip.resolve()
+    second_clip = fixture.second_clip.resolve()
+    ghost, ghost2, ghost3 = pathlib.Path("ghost.mp4"), pathlib.Path("ghost2.mp4"), pathlib.Path("ghost3.mp4")
+    offline_csv = fixture.work_dir / "offline_events.csv"
+    offline_csv.write_text(
+        "File,Inpoint,Inpoint Formatted,Level,Style,Dance,Round\n"
+        f"{clip},2.5,0:00:02.50,Bronze,Standard,Waltz,Final\n"
+        f"{ghost},4.0,0:00:04.00,Silver,Smooth,Foxtrot,Final\n"
+        f"{ghost},7.0,0:00:07.00,Silver,Smooth,Tango,Final\n"
+        f"{ghost2},1.0,0:00:01.00,Gold,Latin,Rumba,Final\n"
+        f"{ghost3},1.5,0:00:01.50,Gold,Latin,Samba,Final\n"
+        f"{second_clip},3.25,0:00:03.25,Gold,Latin,Cha Cha,Final\n",
+        encoding="utf-8",
+    )
+    add_event = _action_named(window, "Add Event")
+    set_inpoint = _action_named(window, "Set Inpoint")
+    play_pause = _action_named(window, "Play / Pause")
+    go_to_event = _action_named(window, "Go to Event")
+    locate_action = _action_named(window, "Locate Video…")
+    video_combo = window.findChild(QtWidgets.QComboBox, "videoCombo")
+    _expect(video_combo is not None, "Could not find the Video drop-down")
+    assert video_combo is not None
+
+    def expect_offline(context: str) -> None:
+        _expect(player.source_path is None, f"The player still has media {context}")
+        _expect(
+            waveform.is_offline and waveform.envelope is None and not waveform.is_error,
+            f"The waveform does not show the offline slate {context} (message: {waveform.status_message!r})",
+        )
+
+    def expect_dropdown(csv_file: pathlib.Path, context: str) -> None:
+        _expect(
+            video_combo.currentData() == csv_file,
+            f"The Video drop-down shows {video_combo.currentText()!r} {context}, expected {csv_file}",
+        )
+
+    # 1. Opening the CSV prompts for nothing: the missing videos join the drop-down as offline entries, in CSV order
+    # after the videos that were already loaded.
+    _expect(window.open_csv(offline_csv), "open_csv failed for the CSV with missing videos")
+    fixture.app.processEvents()
+    keys = [video.csv_file for video in session.videos]
+    _expect(keys == [clip, second_clip, ghost, ghost2, ghost3], f"Session order after opening the CSV: {keys}")
+    offline = session.get(ghost)
+    _expect(
+        isinstance(offline, ballroom_scribe.gui.models.OfflineVideo)
+        and offline.reason == "File not found"
+        and offline.input_video == fixture.work_dir.resolve() / "ghost.mp4",
+        f"ghost.mp4 is not an offline entry: {offline}",
+    )
+    _expect(len(session.loaded_videos) == 2, f"Loaded videos: {[v.csv_file for v in session.loaded_videos]}")
+    _expect_source(fixture, fixture.clip, "after opening the CSV (the first loaded video stays active)")
+
+    # 2. Selecting the offline video blacks out the player, shows the slate, highlights its first row, and disables
+    # everything that needs a playhead.
+    ghost_rows = model.rows_of_video(ghost)
+    _expect(ghost_rows == (1, 2), f"ghost.mp4 rows are {ghost_rows}")
+    window.select_video(ghost)
+    fixture.app.processEvents()
+    expect_offline("after selecting the offline video")
+    expect_dropdown(ghost, "after selecting the offline video")
+    _expect(
+        video_combo.currentText() == "ghost.mp4 (offline)",
+        f"The offline entry is labelled {video_combo.currentText()!r}",
+    )
+    _expect(
+        view.currentIndex().row() == 1
+        and view.selected_rows() == (1,)
+        and viewport.rect().contains(view.visualRect(view.currentIndex())),
+        f"Selecting the offline video left current row {view.currentIndex().row()}, selected {view.selected_rows()}",
+    )
+    _expect(
+        not add_event.isEnabled()
+        and not set_inpoint.isEnabled()
+        and not play_pause.isEnabled()
+        and go_to_event.isEnabled()
+        and locate_action.isEnabled(),
+        "Action states are wrong while an offline video is active",
+    )
+    row_count = model.rowCount()
+    window.add_event_at_playhead()
+    _expect(model.rowCount() == row_count, "Add Event added a row for an offline video")
+
+    # 3. Clicking a loaded video's row brings media back; clicking an offline row blacks it out again.
+    QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(model.index(0, int(col.LEVEL))).center())
+    fixture.app.processEvents()
+    _expect_source(fixture, fixture.clip, "after clicking a loaded video's row")
+    expect_dropdown(clip, "after clicking a loaded video's row")
+    _expect(not waveform.is_offline, "The waveform kept the offline slate after switching to a loaded video")
+    QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(model.index(2, int(col.LEVEL))).center())
+    fixture.app.processEvents()
+    expect_offline("after clicking an offline video's row")
+    expect_dropdown(ghost, "after clicking an offline video's row")
+    _expect(locate_action.isEnabled(), "Locate Video… is disabled with an offline video active")
+
+    # 4. Picking a loaded video in the drop-down highlights its first row and opens it at that row's Inpoint; a video
+    # without rows opens at 0:00.
+    window.select_video(clip)
+    fixture.app.processEvents()
+    _expect_source(fixture, fixture.clip, "after selecting the first clip in the drop-down")
+    expect_dropdown(clip, "after selecting the first clip")
+    _expect(
+        view.currentIndex().row() == 0 and view.selected_rows() == (0,),
+        f"Selecting a loaded video highlighted row {view.currentIndex().row()}",
+    )
+    _expect(
+        abs(player.position_seconds() - _FIRST_ROW_SECONDS) < 1e-3,
+        f"Selecting a loaded video put the playhead at {player.position_seconds():.3f} s",
+    )
+    model.remove_records(model.rows_of_video(second_clip))
+    window.select_video(second_clip)
+    fixture.app.processEvents()
+    _expect_source(fixture, fixture.second_clip, "after selecting a video without rows")
+    _expect(abs(player.position_seconds()) < 1e-3, f"A video without rows opened at {player.position_seconds():.3f} s")
+    model.undo_stack.undo()
+
+    # 5. Locate Video… relinks the entry in place, rewrites its rows' File (relative, since the file sits beside the
+    # CSV), and is one undo step that also takes the media offline again.
+    ghost_found = fixture.work_dir / "ghost_found.mp4"
+    shutil.copyfile(fixture.clip, ghost_found)
+    window.select_video(ghost)
+    fixture.app.processEvents()
+    _expect(window.locate_video(ghost, ghost_found), "locate_video failed")
+    fixture.app.processEvents()
+    relinked = session.videos[2]
+    _expect(
+        isinstance(relinked, ballroom_scribe.gui.models.LoadedVideo)
+        and relinked.csv_file == pathlib.Path("ghost_found.mp4")
+        and relinked.input_video == ghost_found.resolve(),
+        f"The relinked entry is {relinked}",
+    )
+    _expect(
+        [model.record_at(row).file for row in (1, 2)] == [pathlib.Path("ghost_found.mp4")] * 2,
+        f"Relinked rows refer to {[model.record_at(row).file for row in (1, 2)]}",
+    )
+    _expect(model.undo_stack.undoText() == "Locate Video", f"Undo text is {model.undo_stack.undoText()!r}")
+    _expect_source(fixture, ghost_found, "after locating the offline video")
+    _expect(model.rows_of_video(pathlib.Path("ghost_found.mp4")) == (1, 2), "Relinked rows no longer match their video")
+    _wait_until(
+        fixture.app,
+        lambda: waveform.envelope is not None or waveform.is_error,
+        _WAVEFORM_TIMEOUT_SECONDS,
+        "the relinked video's waveform",
+    )
+    _expect(waveform.envelope is not None, f"Relinked waveform failed: {waveform.status_message}")
+
+    model.undo_stack.undo()
+    fixture.app.processEvents()
+    _expect(
+        isinstance(session.videos[2], ballroom_scribe.gui.models.OfflineVideo) and model.record_at(1).file == ghost,
+        "Undo did not restore the offline entry and the old File paths",
+    )
+    expect_offline("after undoing the relink")
+    model.undo_stack.redo()
+    fixture.app.processEvents()
+    _expect(
+        isinstance(session.videos[2], ballroom_scribe.gui.models.LoadedVideo)
+        and model.record_at(1).file == pathlib.Path("ghost_found.mp4"),
+        "Redo did not relink the video again",
+    )
+    _expect_source(fixture, ghost_found, "after redoing the relink")
+
+    # 6. Open Videos… with a file named like an offline video follows the relink policy.
+    found_dir = fixture.work_dir / "found"
+    found_dir.mkdir(exist_ok=True)
+    for name in ("ghost2.mp4", "ghost3.mp4"):
+        shutil.copyfile(fixture.clip, found_dir / name)
+
+    def open_found(name: str, relink_policy: ballroom_scribe.gui.models.RelinkPolicy) -> None:
+        window.add_videos(
+            [
+                ballroom_scribe.cli.arguments.InputCacheArgs(
+                    input_video=found_dir / name,
+                    input_channel=0,
+                    cache_dir=found_dir,
+                )
+            ],
+            relink_policy=relink_policy,
+        )
+        fixture.app.processEvents()
+
+    open_found("ghost2.mp4", policy.SKIP)
+    _expect(
+        len(session) == 5 and isinstance(session.get(ghost2), ballroom_scribe.gui.models.OfflineVideo),
+        "Skipping still opened the video",
+    )
+    open_found("ghost2.mp4", policy.RELINK)
+    _expect(
+        len(session) == 5
+        and isinstance(session.videos[3], ballroom_scribe.gui.models.LoadedVideo)
+        and session.videos[3].csv_file == pathlib.Path("found/ghost2.mp4")
+        and model.record_at(3).file == pathlib.Path("found/ghost2.mp4"),
+        f"Relinking through Open Videos failed: {[v.csv_file for v in session.videos]}, row 3 {model.record_at(3).file}",
+    )
+    open_found("ghost3.mp4", policy.ADD_NEW)
+    _expect(
+        len(session) == 6
+        and isinstance(session.get(ghost3), ballroom_scribe.gui.models.OfflineVideo)
+        and isinstance(session.videos[5], ballroom_scribe.gui.models.LoadedVideo)
+        and model.record_at(4).file == ghost3,
+        f"Adding as new changed the offline entry: {[v.csv_file for v in session.videos]}",
+    )
+    _expect_source(fixture, ghost_found, "after opening videos (the active video must not change)")
+
+    # 7. Saving writes the rewritten paths and leaves the document clean for the Ctrl+W step.
+    _expect(window.save_csv(offline_csv), "save_csv failed after relinking")
+    saved_files = [record.file for record in ballroom_scribe.EventRecorder().read(offline_csv)]
+    _expect(
+        saved_files[1:5] == [pathlib.Path("ghost_found.mp4")] * 2 + [pathlib.Path("found/ghost2.mp4"), ghost3],
+        f"Saved File column: {saved_files}",
+    )
+
+
 def _check_save_round_trip(fixture: _Fixture) -> None:
     window = fixture.window
     saved_csv = fixture.work_dir / "saved_events.csv"
@@ -2490,6 +2715,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Find and replace across rows and columns", _check_find_and_replace),
         ("Edit comments as icons and as text", _check_comment_column),
         ("Save CSV and reload it", _check_save_round_trip),
+        ("Keep an offline video in the drop-down", _check_offline_videos),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),
         ("Close the window while audio is being extracted", _check_close_during_extraction),
