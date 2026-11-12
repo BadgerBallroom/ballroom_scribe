@@ -1,4 +1,4 @@
-"""Custom `QPainter` audio waveform widget with click-to-seek, recentering playhead drift, zoom, and event markers."""
+"""Custom `QPainter` waveform widget with click-to-seek, recentering drift, zoom, scrolling, and event markers."""
 
 import math
 from collections.abc import Callable, Iterable, Sequence
@@ -16,6 +16,7 @@ _DEFAULT_WINDOW_SECONDS = 720.0
 _MAX_WINDOW_FACTOR = 1.1  # The whole clip plus a margin so both ends stay visible.
 _ZOOM_STEP = 0.8  # Window factor per zoom-in step; zooming out uses the reciprocal.
 _WHEEL_NOTCH_ANGLE_DELTA = 120  # `QWheelEvent.angleDelta()` units per notch of a mouse wheel.
+_WHEEL_PAN_FRACTION = 0.1  # Share of the visible span that one wheel notch scrolls sideways.
 _RECENTER_DURATION_SECONDS = 5.0
 _MAX_PLAYBACK_TICK_SECONDS = 0.5
 _ASYNC_SNAP_TOLERANCE_SECONDS = 0.05
@@ -63,7 +64,7 @@ def _paint_focus_frame(painter: QtGui.QPainter, rect: QtCore.QRect) -> None:
 
 
 class WaveformWidget(QtWidgets.QWidget):
-    """Renders a `WaveformEnvelope` with zoom, click-to-seek, 5 s recentering drift, drag-to-pan, and markers."""
+    """Renders a `WaveformEnvelope` with zoom, click-to-seek, 5 s recentering drift, drag/scroll-to-pan, and markers."""
 
     seek_requested = QtCore.Signal(float)
     step_requested = QtCore.Signal(float)
@@ -538,13 +539,36 @@ class WaveformWidget(QtWidgets.QWidget):
         if self._envelope is None:
             event.ignore()
             return
-        delta = event.angleDelta().y()
-        if delta == 0:
+        delta_x = event.angleDelta().x()
+        delta_y = event.angleDelta().y()
+        shift_held = bool(event.modifiers() & QtCore.Qt.KeyboardModifier.ShiftModifier)
+        if abs(delta_x) > abs(delta_y):
+            # A horizontal wheel or touchpad swipe (macOS also reports Shift+wheel this way) scrolls sideways.
+            self._pan_by_wheel(delta_x)
+        elif delta_y and shift_held:
+            # Shift turns the wheel sideways where the platform passes it through vertically (Windows, X11).
+            self._pan_by_wheel(delta_y)
+        elif delta_y:
+            # Proportional to the scrolled amount: a mouse-wheel notch zooms one step and a touchpad zooms smoothly.
+            self.set_window_seconds(self._window_seconds * _ZOOM_STEP ** (delta_y / _WHEEL_NOTCH_ANGLE_DELTA))
+        else:
             event.ignore()
             return
-        # Proportional to the scrolled amount: a mouse-wheel notch zooms one step and a touchpad zooms smoothly.
-        self.set_window_seconds(self._window_seconds * _ZOOM_STEP ** (delta / _WHEEL_NOTCH_ANGLE_DELTA))
         event.accept()
+
+    def _pan_by_wheel(self, angle_delta: int) -> None:
+        """Scrolls the view by `_WHEEL_PAN_FRACTION` of the visible span per wheel notch by moving the playhead.
+
+        As with drag-to-pan, the playhead keeps its place on screen and the audio under it changes. A negative
+        delta (wheel towards the user, swipe to the left) moves to later audio, as it scrolls a scroll area down or
+        to the right; the clip's ends are never scrolled past.
+        """
+        assert self._envelope is not None
+        notches = angle_delta / _WHEEL_NOTCH_ANGLE_DELTA
+        target_sec = self._position_seconds - notches * _WHEEL_PAN_FRACTION * self._window_seconds
+        clamped = min(max(0.0, target_sec), self._envelope.duration_seconds)
+        if clamped != self._position_seconds:
+            self._emit_seek(clamped)
 
     @override
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:

@@ -692,7 +692,13 @@ def _check_switching_video_renders_frames(fixture: _Fixture) -> None:
         _expect_paused(fixture, "after switching back to the first video")
 
 
-def _send_wheel(fixture: _Fixture, angle_delta_y: int) -> None:
+def _send_wheel(
+    fixture: _Fixture,
+    angle_delta_y: int,
+    *,
+    angle_delta_x: int = 0,
+    modifiers: QtCore.Qt.KeyboardModifier = _NO_MODIFIER,
+) -> None:
     """Delivers a wheel event over the middle of the waveform."""
     waveform = fixture.window.waveform
     local = QtCore.QPointF(waveform.width() / 2, waveform.height() / 2)
@@ -700,9 +706,9 @@ def _send_wheel(fixture: _Fixture, angle_delta_y: int) -> None:
         local,
         waveform.mapToGlobal(local),
         QtCore.QPoint(0, 0),
-        QtCore.QPoint(0, angle_delta_y),
+        QtCore.QPoint(angle_delta_x, angle_delta_y),
         QtCore.Qt.MouseButton.NoButton,
-        QtCore.Qt.KeyboardModifier.NoModifier,
+        modifiers,
         QtCore.Qt.ScrollPhase.NoScrollPhase,
         False,
     )
@@ -755,6 +761,77 @@ def _check_waveform_zoom(fixture: _Fixture) -> None:
         waveform.reset_zoom()
     finally:
         waveform.window_changed.disconnect(spans.append)
+
+
+def _check_waveform_scroll(fixture: _Fixture) -> None:
+    """Shift+wheel and a horizontal wheel scroll the waveform sideways (moving the playhead); a plain wheel zooms."""
+    window = fixture.window
+    waveform = window.waveform
+    player = window.player
+    shift = QtCore.Qt.KeyboardModifier.ShiftModifier
+    _expect(waveform.envelope is not None, "Waveform is not loaded")
+    assert waveform.envelope is not None
+    duration = waveform.envelope.duration_seconds
+    start_position = waveform.position_seconds
+
+    def expect_playhead(expected_seconds: float, context: str) -> None:
+        _expect(
+            abs(waveform.position_seconds - expected_seconds) < 1e-3
+            and abs(player.position_seconds() - expected_seconds) < 1e-3,
+            f"Playhead is at {waveform.position_seconds:.3f} s (player {player.position_seconds():.3f} s) {context},"
+            f" expected {expected_seconds:.3f} s",
+        )
+
+    try:
+        player.seek(5.0)
+        fixture.app.processEvents()
+        waveform.recenter_playhead()
+        waveform.set_window_seconds(4.0)
+        _expect_span(fixture, 4.0, "after setting a 4 s span")
+        start_sec, _ = waveform.visible_range
+
+        # 1. Shift+wheel towards the user scrolls to later audio by a tenth of the span per notch, keeping the span
+        # and the playhead's place on screen; away from the user scrolls back.
+        _send_wheel(fixture, -120, modifiers=shift)
+        expect_playhead(5.4, "after one Shift+wheel notch towards the user")
+        _expect_span(fixture, 4.0, "after Shift+wheel (it must scroll, not zoom)")
+        _expect(
+            abs(waveform.playhead_offset_fraction) < 1e-6 and abs(waveform.visible_range[0] - (start_sec + 0.4)) < 1e-3,
+            f"Shift+wheel left offset {waveform.playhead_offset_fraction:.4f} and range {waveform.visible_range}",
+        )
+        _send_wheel(fixture, 120, modifiers=shift)
+        expect_playhead(5.0, "after one Shift+wheel notch away from the user")
+
+        # 2. A horizontal wheel or touchpad swipe scrolls the same way without Shift, and wins over a smaller vertical
+        # component instead of zooming.
+        _send_wheel(fixture, 0, angle_delta_x=-120)
+        expect_playhead(5.4, "after one horizontal wheel notch")
+        _send_wheel(fixture, 30, angle_delta_x=120)
+        expect_playhead(5.0, "after a mostly horizontal wheel movement back")
+        _expect_span(fixture, 4.0, "after horizontal wheel movements")
+
+        # 3. A plain vertical wheel still zooms around the playhead, and a smaller scroll amount scrolls proportionally.
+        _send_wheel(fixture, 120)
+        _expect_span(fixture, 3.2, "after one plain wheel notch")
+        expect_playhead(5.0, "after zooming with the wheel")
+        _send_wheel(fixture, -60, modifiers=shift)
+        expect_playhead(5.16, "after half a Shift+wheel notch")
+
+        # 4. Scrolling never leaves the clip.
+        for _ in range(60):
+            _send_wheel(fixture, -120, modifiers=shift)
+        _expect(
+            abs(waveform.position_seconds - duration) < _FRAME_TOLERANCE_SECONDS,
+            f"Scrolling past the end left the playhead at {waveform.position_seconds:.3f} s of {duration:.3f} s",
+        )
+        for _ in range(60):
+            _send_wheel(fixture, 120, modifiers=shift)
+        expect_playhead(0.0, "after scrolling past the start")
+    finally:
+        waveform.reset_zoom()
+        player.seek(start_position)
+        fixture.app.processEvents()
+        waveform.recenter_playhead()
 
 
 def _waveform_point(waveform: ballroom_scribe.gui.WaveformWidget, target_seconds: float) -> QtCore.QPoint:
@@ -2949,6 +3026,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Drag the fill handle to copy a value", _check_fill_handle),
         ("Switch between videos from the table", _check_switching_video_renders_frames),
         ("Zoom the waveform", _check_waveform_zoom),
+        ("Scroll the waveform with Shift+wheel and a horizontal wheel", _check_waveform_scroll),
         ("Click and drag the waveform", _check_waveform_click_and_drag),
         ("Follow playback in the table", _check_playback_follows_rows),
         ("Paint the focused waveform", _check_focused_waveform_paints_interior),

@@ -209,7 +209,8 @@ including Qt multimedia backend diagnostics, to the console.
 ### Editor Features
 
 *   **Synchronized video and waveform**: Displays an audio waveform with click-to-seek, drag-to-pan (the audio follows
-    the mouse), per-video audio channel selection, and active-video event markers.
+    the mouse), <kbd>Shift</kbd> + wheel or horizontal-wheel scrolling, per-video audio channel selection, and
+    active-video event markers.
 *   **Interactive event table**: Click a row to switch to its video and jump to its inpoint. Other rows with the same
     level, style, and dance are faintly highlighted so all rounds of the event stand out.
     *   Type an inpoint directly, or press **Set Inpoint** (<kbd>Ctrl</kbd> + <kbd>I</kbd>) to stamp the current video
@@ -258,6 +259,7 @@ including Qt multimedia backend diagnostics, to the console.
 | <kbd>Ctrl</kbd> + <kbd>S</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>S</kbd> | Save / Save As |
 | <kbd>Ctrl</kbd> + <kbd>O</kbd> / <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>O</kbd> | Open videos / open CSV |
 | <kbd>Ctrl</kbd> + <kbd>+</kbd> / <kbd>Ctrl</kbd> + <kbd>=</kbd>, <kbd>Ctrl</kbd> + <kbd>-</kbd>, <kbd>Ctrl</kbd> + <kbd>0</kbd> | Zoom the waveform in / out / back to 12 min (mouse wheel also zooms) |
+| <kbd>Shift</kbd> + wheel, or a horizontal wheel / touchpad swipe (over the waveform) | Scroll the waveform a tenth of its span per notch, moving the playhead |
 | <kbd>Ctrl</kbd> + <kbd>R</kbd> | Auto-find events |
 | <kbd>Ctrl</kbd> + <kbd>W</kbd> | Close session |
 | <kbd>Alt</kbd> + <kbd>F4</kbd> (Windows), <kbd>Ctrl</kbd> + <kbd>Q</kbd> / <kbd>⌘</kbd><kbd>Q</kbd> elsewhere | Exit |
