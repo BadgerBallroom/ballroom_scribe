@@ -32,6 +32,7 @@ def _make_audio_chunk(
     return ballroom_scribe.models.AudioChunk(
         data=np.arange(start_samples, start_samples + num_samples, dtype=np.float32),
         sample_rate=sample_rate,
+        channel=_CHANNEL,
         classification=classification,
         start_samples=start_samples,
     )
@@ -165,7 +166,7 @@ class TestClassify(unittest.TestCase):
         )
 
     def test_empty_chunks_iterable_yields_nothing(self):
-        result = list(self.classifier.classify([], channel=_CHANNEL, cache_dir=_CACHE_DIR))
+        result = list(self.classifier.classify([], cache_dir=_CACHE_DIR))
 
         self.assertEqual(result, [])
         self.mock_classify_chunk.assert_not_called()
@@ -368,7 +369,7 @@ class TestClassify(unittest.TestCase):
         self.mock_cut_end.side_effect = cut_end_side_effect
         self.mock_cut_beginning.side_effect = cut_beginning_side_effect
 
-        result = list(self.classifier.classify(input_chunks, channel=_CHANNEL, cache_dir=_CACHE_DIR))
+        result = list(self.classifier.classify(input_chunks, cache_dir=_CACHE_DIR))
 
         expected_calls = [call(ANY, cutoff) for cutoff in expected_cut_calls]
         self.mock_cut_end.assert_has_calls(expected_calls)
@@ -399,11 +400,12 @@ class TestClassifyChunk(unittest.TestCase):
         empty_chunk = ballroom_scribe.models.AudioChunk(
             data=np.array([]),
             sample_rate=10,
+            channel=_CHANNEL,
             classification=Classification.UNKNOWN,
             start_samples=0,
         )
 
-        result = list(self.classifier._classify_chunk(empty_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR))
+        result = list(self.classifier._classify_chunk(empty_chunk, cache_dir=_CACHE_DIR))
 
         self.assertEqual(result, [])
         self.mock_pann_inferencer.infer_chunk.assert_not_called()
@@ -461,11 +463,9 @@ class TestClassifyChunk(unittest.TestCase):
         self.mock_pann_inferencer.infer_chunk.return_value = mock_frames
         self.mock_classify_frames.return_value = sample_classifications_rle
 
-        result = list(self.classifier._classify_chunk(audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR))
+        result = list(self.classifier._classify_chunk(audio_chunk, cache_dir=_CACHE_DIR))
 
-        self.mock_pann_inferencer.infer_chunk.assert_called_once_with(
-            audio_chunk=audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR
-        )
+        self.mock_pann_inferencer.infer_chunk.assert_called_once_with(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
         self.mock_classify_frames.assert_called_once_with(
             frames=mock_frames,
             num_samples=audio_chunk.duration_samples,

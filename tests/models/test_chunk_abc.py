@@ -17,6 +17,7 @@ class TestChunk(unittest.TestCase):
             start_samples=100,
             sample_rate=10,
             duration_samples=10,
+            channel=1,
         )
 
     def test_start_seconds(self):
@@ -35,7 +36,7 @@ class TestChunk(unittest.TestCase):
         self.assertAlmostEqual(self.chunk.midpoint_seconds, 10.5)
 
     def test_get_filename_stem(self):
-        self.assertEqual(self.chunk.get_filename_stem(), "0000000100-0000000110")
+        self.assertEqual(self.chunk.get_filename_stem(), "0000000100-0000000110-1")
 
     def test_format_time_range(self):
         self.assertEqual(self.chunk.format_time_range(), "0:00:10.00 - 0:00:11.00\t(0:00:01.00)")

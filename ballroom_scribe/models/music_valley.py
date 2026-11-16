@@ -13,7 +13,7 @@ class MusicValley(Chunk):
         speech_chunks: Chunks of speech within this music valley.
 
     Inherited Attributes:
-        From `Chunk`: `start_samples`, `sample_rate`, `duration_samples`. See :class:`Chunk` for details.
+        From `Chunk`: `start_samples`, `sample_rate`, `duration_samples`, `channel`. See :class:`Chunk` for details.
     """
 
     speech_chunks: tuple[AudioChunk, ...]

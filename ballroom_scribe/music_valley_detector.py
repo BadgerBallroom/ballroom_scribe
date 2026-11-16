@@ -16,6 +16,7 @@ class _PeeledDance:
         core_start_samples: Start sample of the dance's core, after any `leading_speech` has been removed.
         core_end_samples: End sample of the dance's core, before any `trailing_speech` begins.
         sample_rate: Sample rate of the dance's audio chunks in samples per second.
+        channel: Audio channel of the dance's audio chunks.
         trailing_speech: Consecutive chunks at the end of the dance that contain speech (e.g., emcee speaking over
             a music fade-out), to be prepended to the following music valley.
     """
@@ -24,6 +25,7 @@ class _PeeledDance:
     core_start_samples: int
     core_end_samples: int
     sample_rate: int
+    channel: int
     trailing_speech: tuple[ballroom_scribe.models.AudioChunk, ...]
 
 
@@ -136,9 +138,11 @@ class MusicValleyDetector:
         has_unyielded_valley = False
         last_chunk_end_samples = 0
         sample_rate = 0
+        channel = 0
 
         for item in self._segment_stream(classified_chunks):
             sample_rate = item.sample_rate
+            channel = item.channel
             if isinstance(item, _PeeledDance):
                 valley_speech_chunks.extend(item.leading_speech)
                 if item.core_start_samples > valley_start_samples:
@@ -146,6 +150,7 @@ class MusicValleyDetector:
                         start_samples=valley_start_samples,
                         sample_rate=sample_rate,
                         duration_samples=item.core_start_samples - valley_start_samples,
+                        channel=channel,
                         speech_chunks=_finalize_valley_speech(valley_speech_chunks),
                     )
                 # Detach trailing fade-out speech immediately so the dance's 10-min buffer can be freed
@@ -167,6 +172,7 @@ class MusicValleyDetector:
                 start_samples=valley_start_samples,
                 sample_rate=sample_rate,
                 duration_samples=last_chunk_end_samples - valley_start_samples,
+                channel=channel,
                 speech_chunks=_finalize_valley_speech(valley_speech_chunks),
             )
 
@@ -271,6 +277,7 @@ class MusicValleyDetector:
             core_start_samples=core_start,
             core_end_samples=core_end,
             sample_rate=dance_chunks[0].sample_rate,
+            channel=dance_chunks[0].channel,
             trailing_speech=tuple(dance_chunks[end_index:]),
         )
 

@@ -11,6 +11,7 @@ import ballroom_scribe
 import ballroom_scribe.models
 
 _SAMPLE_RATE = 10
+_CHANNEL = 1
 _DTYPE = "int32"
 _MINUTES_PER_FIVE_SAMPLES = 1.0 / 120.0
 _SECONDS_PER_SAMPLE = 0.1
@@ -101,7 +102,7 @@ class TestAudioLoader(unittest.TestCase):
         audio_loader = ballroom_scribe.AudioLoader(chunk_minutes=1.0, chunk_overlap_seconds=1.0)
 
         with self.assertRaisesRegex(ValueError, expected_regex):
-            list(audio_loader.load(self.input_audio))
+            list(audio_loader.load(self.input_audio, channel=_CHANNEL))
 
         self.mock_soundfile.read.assert_not_called()
 
@@ -122,24 +123,28 @@ class TestAudioLoader(unittest.TestCase):
                     ballroom_scribe.models.AudioChunk(
                         start_samples=0,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(0, 5, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=5,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(5, 10, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=10,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(10, 15, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=15,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(15, 18, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
@@ -160,24 +165,28 @@ class TestAudioLoader(unittest.TestCase):
                     ballroom_scribe.models.AudioChunk(
                         start_samples=0,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(0, 6, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=5,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(5, 11, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=10,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(10, 16, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=15,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(15, 18, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
@@ -193,6 +202,7 @@ class TestAudioLoader(unittest.TestCase):
                     ballroom_scribe.models.AudioChunk(
                         start_samples=0,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(0, 4, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
@@ -211,12 +221,14 @@ class TestAudioLoader(unittest.TestCase):
                     ballroom_scribe.models.AudioChunk(
                         start_samples=0,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(0, 6, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
                     ballroom_scribe.models.AudioChunk(
                         start_samples=5,
                         sample_rate=_SAMPLE_RATE,
+                        channel=_CHANNEL,
                         data=np.arange(5, 11, dtype=_DTYPE),
                         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
                     ),
@@ -233,7 +245,7 @@ class TestAudioLoader(unittest.TestCase):
             chunk_overlap_seconds=overlap_seconds,
         )
 
-        chunks = list(audio_loader.load(self.input_audio))
+        chunks = list(audio_loader.load(self.input_audio, channel=_CHANNEL))
 
         self.mock_soundfile.read.assert_has_calls(expected_read_calls)
         self.assertEqual(chunks, expected_chunks)

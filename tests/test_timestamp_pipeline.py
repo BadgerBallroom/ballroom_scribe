@@ -24,12 +24,17 @@ _VIDEO_CACHE_DIR_B = pathlib.Path("fake_video_cache_b")
 _OUTPUT_CSV = pathlib.Path("fake_output.csv")
 
 
-def _make_music_valley(start_samples: int, duration_samples: int) -> ballroom_scribe.models.MusicValley:
+def _make_music_valley(
+    start_samples: int,
+    duration_samples: int,
+    channel: int,
+) -> ballroom_scribe.models.MusicValley:
     """Helper to create a `MusicValley` without any speech chunks."""
     return ballroom_scribe.models.MusicValley(
         start_samples=start_samples,
         sample_rate=10,
         duration_samples=duration_samples,
+        channel=channel,
         speech_chunks=(),
     )
 
@@ -130,9 +135,9 @@ class TestPipeline(unittest.TestCase):
         self.mock_audio_classifier.classify.side_effect = [classified_chunks_a, classified_chunks_b]
 
         # Use generators to make sure that the pipeline consumes all of the music valleys before freeing the PANN.
-        spoken_valley_a = _make_music_valley(start_samples=0, duration_samples=100)
-        silent_valley_a = _make_music_valley(start_samples=500, duration_samples=100)
-        valley_b = _make_music_valley(start_samples=200, duration_samples=100)
+        spoken_valley_a = _make_music_valley(start_samples=0, duration_samples=100, channel=_INPUT_CHANNEL_A)
+        silent_valley_a = _make_music_valley(start_samples=500, duration_samples=100, channel=_INPUT_CHANNEL_A)
+        valley_b = _make_music_valley(start_samples=200, duration_samples=100, channel=_INPUT_CHANNEL_B)
         self.mock_music_valley_detector.detect.side_effect = [
             iter([spoken_valley_a, silent_valley_a]),
             iter([valley_b]),
@@ -226,8 +231,8 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(
             self.mock_audio_loader.load.call_args_list,
             [
-                call(input_audio=extracted_audio_a),
-                call(input_audio=extracted_audio_b),
+                call(input_audio=extracted_audio_a, channel=_INPUT_CHANNEL_A),
+                call(input_audio=extracted_audio_b, channel=_INPUT_CHANNEL_B),
             ],
         )
         self.assertEqual(
@@ -264,28 +269,23 @@ class TestPipeline(unittest.TestCase):
                 ),
                 call.classify(
                     audio_chunks=audio_chunks_a,
-                    channel=_INPUT_CHANNEL_A,
                     cache_dir=_VIDEO_CACHE_DIR_A,
                 ),
                 call.classify(
                     audio_chunks=audio_chunks_b,
-                    channel=_INPUT_CHANNEL_B,
                     cache_dir=_VIDEO_CACHE_DIR_B,
                 ),
                 call.free_vram(),
                 call.transcribe(
                     music_valley=spoken_valley_a,
-                    channel=_INPUT_CHANNEL_A,
                     cache_dir=_VIDEO_CACHE_DIR_A,
                 ),
                 call.transcribe(
                     music_valley=silent_valley_a,
-                    channel=_INPUT_CHANNEL_A,
                     cache_dir=_VIDEO_CACHE_DIR_A,
                 ),
                 call.transcribe(
                     music_valley=valley_b,
-                    channel=_INPUT_CHANNEL_B,
                     cache_dir=_VIDEO_CACHE_DIR_B,
                 ),
                 call.free_vram(),

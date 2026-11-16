@@ -53,10 +53,9 @@ def load_probabilities(
 
     pann_inferencer: ballroom_scribe.PannInferencer | None = ballroom_scribe.PannInferencer(device=pann_device)
     try:
-        unclassified_chunks = audio_loader.load(input_audio=extracted_audio)
+        unclassified_chunks = audio_loader.load(input_audio=extracted_audio, channel=input_channel)
         probabilities = pann_inferencer.infer(
             audio_chunks=unclassified_chunks,
-            channel=input_channel,
             cache_dir=cache_dir,
         )
     finally:

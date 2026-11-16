@@ -134,7 +134,6 @@ class SpeechTranscriber:
     def transcribe(
         self,
         music_valley: ballroom_scribe.models.MusicValley,
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> ballroom_scribe.models.TranscriptChunk:
         """Transcribes the speech in a music valley into word-level timestamps.
@@ -144,7 +143,6 @@ class SpeechTranscriber:
 
         Args:
             music_valley: The music valley whose `speech_chunks` will be transcribed.
-            channel: The audio channel from which the speech chunks were loaded.
             cache_dir: The directory in which transcriptions will be cached.
 
         Returns:
@@ -154,32 +152,31 @@ class SpeechTranscriber:
         words = tuple(
             word
             for audio_chunk in music_valley.speech_chunks
-            for word in self._load_or_transcribe_chunk(audio_chunk=audio_chunk, channel=channel, cache_dir=cache_dir)
+            for word in self._load_or_transcribe_chunk(audio_chunk=audio_chunk, cache_dir=cache_dir)
         )
         return ballroom_scribe.models.TranscriptChunk(
             start_samples=music_valley.start_samples,
             sample_rate=music_valley.sample_rate,
             duration_samples=music_valley.duration_samples,
+            channel=music_valley.channel,
             words=words,
         )
 
     def _load_or_transcribe_chunk(
         self,
         audio_chunk: ballroom_scribe.models.AudioChunk,
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> Iterable[ballroom_scribe.models.Word]:
         """Loads the words of one speech chunk from the cache, or transcribes the chunk if it is not cached.
 
         Args:
             audio_chunk: The speech chunk to transcribe.
-            channel: The audio channel from which `audio_chunk` was loaded.
             cache_dir: The directory in which transcriptions will be cached.
 
         Returns:
             The transcribed words.
         """
-        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}-{channel}.csv"
+        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}.csv"
         if cache_file.exists():
             return _read_words_from_file(cache_file)
 

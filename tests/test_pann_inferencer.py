@@ -23,6 +23,7 @@ def _make_audio_chunk(
     return ballroom_scribe.models.AudioChunk(
         data=np.arange(start_samples, start_samples + num_samples, dtype=np.float32),
         sample_rate=sample_rate,
+        channel=_CHANNEL,
         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
         start_samples=start_samples,
     )
@@ -53,7 +54,7 @@ class TestInfer(unittest.TestCase):
         self.inferencer = ballroom_scribe.PannInferencer(device="cuda")
 
     def test_empty_chunks_iterable_returns_empty_array(self):
-        result = self.inferencer.infer([], channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.inferencer.infer([], cache_dir=_CACHE_DIR)
 
         self.assertEqual(result.shape, (0, len(ballroom_scribe.PannInferencer.CLASSIFICATIONS)))
         self.mock_infer_chunk.assert_not_called()
@@ -64,7 +65,7 @@ class TestInfer(unittest.TestCase):
             _make_audio_chunk(start_samples=10, num_samples=0, sample_rate=10),
         ]
 
-        result = self.inferencer.infer(empty_chunks, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.inferencer.infer(empty_chunks, cache_dir=_CACHE_DIR)
 
         self.assertEqual(result.shape, (0, len(ballroom_scribe.PannInferencer.CLASSIFICATIONS)))
         self.mock_infer_chunk.assert_not_called()
@@ -164,10 +165,10 @@ class TestInfer(unittest.TestCase):
     def test_infer(self, _, input_chunks, inference_returns, expected_result):
         self.mock_infer_chunk.side_effect = inference_returns
 
-        result = self.inferencer.infer(input_chunks, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.inferencer.infer(input_chunks, cache_dir=_CACHE_DIR)
 
         non_empty_chunks = [chunk for chunk in input_chunks if chunk]
-        expected_calls = [call(audio_chunk=chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR) for chunk in non_empty_chunks]
+        expected_calls = [call(audio_chunk=chunk, cache_dir=_CACHE_DIR) for chunk in non_empty_chunks]
         self.mock_infer_chunk.assert_has_calls(expected_calls)
         np.testing.assert_array_equal(result, expected_result)
 
@@ -199,8 +200,8 @@ class TestInferChunk(unittest.TestCase):
         self.mock_sed.inference.return_value = np.zeros((1, 2, 527), dtype=np.float32)
 
         self.mock_sed_cls.assert_not_called()
-        self.inferencer.infer_chunk(audio_chunk=audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR)
-        self.inferencer.infer_chunk(audio_chunk=audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
+        self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
         self.mock_sed_cls.assert_called_once_with(device="cuda")
 
     def test_cache_hit_loads_inference_from_cache(self):
@@ -209,7 +210,7 @@ class TestInferChunk(unittest.TestCase):
         cached_frames = np.zeros((4, 2), dtype=np.float32)
         self.mock_np_load.return_value = cached_frames
 
-        result = self.inferencer.infer_chunk(audio_chunk=audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
 
         self.mock_path_exists.assert_called_once_with()
         self.mock_np_load.assert_called_once_with(_CACHE_DIR / f"0000000100-0000000140-{_CHANNEL}.npy")
@@ -243,7 +244,7 @@ class TestInferChunk(unittest.TestCase):
             dtype=np.float32,
         )
 
-        result = self.inferencer.infer_chunk(audio_chunk=audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
 
         self.mock_path_exists.assert_called_once_with()
         self.mock_np_load.assert_not_called()

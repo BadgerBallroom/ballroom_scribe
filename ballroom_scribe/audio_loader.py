@@ -41,7 +41,7 @@ class AudioLoader:
         # This is the actual number of samples in each chunk except the first and last.
         self._chunk_actual_shape = (self._overlap_samples * 2 + self._core_samples,)
 
-    def load(self, input_audio: pathlib.Path) -> Generator[ballroom_scribe.models.AudioChunk]:
+    def load(self, input_audio: pathlib.Path, channel: int) -> Generator[ballroom_scribe.models.AudioChunk]:
         """Loads audio in overlapping chunks from the input audio file.
 
         The first block is extended by the overlap duration at the end only.
@@ -50,6 +50,9 @@ class AudioLoader:
 
         Args:
             input_audio: The path to a 32,000 Hz mono WAV file.
+            channel: The zero-based index of the audio channel of the input video from which `input_audio` was
+                extracted. It is recorded on every yielded chunk so that cache files derived from the chunks are
+                specific to this channel.
         """
         with soundfile.SoundFile(input_audio, mode="r") as f:
             if f.samplerate != self.SAMPLE_RATE:
@@ -71,7 +74,7 @@ class AudioLoader:
             # `SoundFile.blocks` yields blocks of the same length until the last block. This is not what we want; the
             # first block should be slightly shorter because it is only extended by the overlap duration at the end.
             new_block = f.read(frames=self._core_samples + self._overlap_samples, dtype=self.DTYPE)
-            yield self._make_audio_chunk(start_samples=0, data=new_block)
+            yield self._make_audio_chunk(start_samples=0, data=new_block, channel=channel)
             start_samples = new_block.shape[0]
 
             # A frame contains simultaneous samples from all channels.
@@ -90,14 +93,21 @@ class AudioLoader:
                 # If it's the last chunk, fewer than `self._read_samples` samples may have been read. Slice the block.
                 new_block = new_block[: self._overlap_samples + read_data.shape[0]]
 
-                yield self._make_audio_chunk(start_samples=start_samples, data=new_block)
+                yield self._make_audio_chunk(start_samples=start_samples, data=new_block, channel=channel)
                 start_samples += new_block.shape[0]
 
-    def _make_audio_chunk(self, *, start_samples: int, data: soundfile.AudioData) -> ballroom_scribe.models.AudioChunk:
+    def _make_audio_chunk(
+        self,
+        *,
+        start_samples: int,
+        data: soundfile.AudioData,
+        channel: int,
+    ) -> ballroom_scribe.models.AudioChunk:
         return ballroom_scribe.models.AudioChunk(
             start_samples=start_samples,
             data=data,
             sample_rate=self.SAMPLE_RATE,
+            channel=channel,
             # The classification is always unknown here. Classifying is `AudioClassifier`'s job.
             classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
         )

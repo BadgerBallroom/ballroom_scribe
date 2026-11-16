@@ -23,10 +23,12 @@ class _Video:
         cache_dir: The path to the video's own cache directory. Inside it, there will be:
             - `Audio-Channel-*.wav`: the extracted audio from the input video
             - `Waveform-Channel-*.npz`: min/max waveform peaks cached by the GUI editor
-            - `*.npy`: audio classification inferences
-            - `*.csv`: the transcribed words of each speech chunk
-            - `*.json`: the detected events from the transcript
-            - `*.md`: LLM thinking output
+            - `<start>-<end>-<channel>.npy`: audio classification inferences
+            - `<start>-<end>-<channel>.csv`: the transcribed words of each speech chunk
+            - `<start>-<end>-<channel>.json`: the detected events from the transcript
+            - `<start>-<end>-<channel>.md`: LLM thinking output
+            `<start>` and `<end>` are sample indices into the extracted audio and `<channel>` is `input_channel`, so
+            results for different channels of the same video never collide.
             Except for the `*.md` files, each file is first written to a temporary `*.partial.*` file and renamed once
             complete, so an existing file is never partially written.
     """
@@ -103,7 +105,6 @@ def _transcribe_speech(
         print(music_valley.format_time_range())
         transcript_chunk = speech_transcriber.transcribe(
             music_valley=music_valley,
-            channel=video.input_channel,
             cache_dir=video.cache_dir,
         )
         # Keep music valleys in which nothing was said so that every music valley produces an event.
@@ -275,10 +276,9 @@ class TimestampPipeline:
         Returns:
             The detected music valleys across the video's audio stream.
         """
-        unclassified_audio_chunks = self._audio_loader.load(input_audio=extracted_audio)
+        unclassified_audio_chunks = self._audio_loader.load(input_audio=extracted_audio, channel=video.input_channel)
         classified_audio_chunks = audio_classifier.classify(
             audio_chunks=unclassified_audio_chunks,
-            channel=video.input_channel,
             cache_dir=video.cache_dir,
         )
         music_valleys = self._music_valley_detector.detect(

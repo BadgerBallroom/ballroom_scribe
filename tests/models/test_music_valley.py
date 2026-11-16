@@ -11,6 +11,7 @@ def _make_audio_chunk(num_samples: int) -> ballroom_scribe.models.AudioChunk:
     return ballroom_scribe.models.AudioChunk(
         data=np.zeros(num_samples),
         sample_rate=10,
+        channel=1,
         classification=MagicMock(spec=ballroom_scribe.models.AudioChunk.Classification),
         start_samples=0,
     )
@@ -33,6 +34,7 @@ class TestMusicValley(unittest.TestCase):
             start_samples=100,
             sample_rate=10,
             duration_samples=10,
+            channel=1,
             speech_chunks=speech_chunks,
         )
         self.assertEqual(bool(valley), expected)

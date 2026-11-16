@@ -23,6 +23,7 @@ def _make_audio_chunk(start_samples: int, num_samples: int, sample_rate: int = 1
     return ballroom_scribe.models.AudioChunk(
         data=np.arange(start_samples, start_samples + num_samples, dtype=np.float32),
         sample_rate=sample_rate,
+        channel=_CHANNEL,
         classification=ballroom_scribe.models.AudioChunk.Classification.SPEECH,
         start_samples=start_samples,
     )
@@ -141,6 +142,7 @@ class TestTranscribe(unittest.TestCase):
             start_samples=80,
             sample_rate=10,
             duration_samples=300,
+            channel=_CHANNEL,
             speech_chunks=(first_chunk, second_chunk),
         )
         first_words = (
@@ -150,12 +152,12 @@ class TestTranscribe(unittest.TestCase):
         second_words = (ballroom_scribe.models.Word(word="dance", start=20.0, end=20.5),)
         self.mock_load_or_transcribe_chunk.side_effect = [iter(first_words), iter(second_words)]
 
-        result = self.transcriber.transcribe(music_valley=music_valley, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.transcriber.transcribe(music_valley=music_valley, cache_dir=_CACHE_DIR)
 
         self.mock_load_or_transcribe_chunk.assert_has_calls(
             [
-                call(audio_chunk=first_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR),
-                call(audio_chunk=second_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR),
+                call(audio_chunk=first_chunk, cache_dir=_CACHE_DIR),
+                call(audio_chunk=second_chunk, cache_dir=_CACHE_DIR),
             ]
         )
         self.assertEqual(self.mock_load_or_transcribe_chunk.call_count, 2)
@@ -165,6 +167,7 @@ class TestTranscribe(unittest.TestCase):
                 start_samples=80,
                 sample_rate=10,
                 duration_samples=300,
+                channel=_CHANNEL,
                 words=first_words + second_words,
             ),
         )
@@ -174,10 +177,11 @@ class TestTranscribe(unittest.TestCase):
             start_samples=80,
             sample_rate=10,
             duration_samples=300,
+            channel=_CHANNEL,
             speech_chunks=(),
         )
 
-        result = self.transcriber.transcribe(music_valley=music_valley, channel=_CHANNEL, cache_dir=_CACHE_DIR)
+        result = self.transcriber.transcribe(music_valley=music_valley, cache_dir=_CACHE_DIR)
 
         self.mock_load_or_transcribe_chunk.assert_not_called()
         self.assertEqual(
@@ -186,6 +190,7 @@ class TestTranscribe(unittest.TestCase):
                 start_samples=80,
                 sample_rate=10,
                 duration_samples=300,
+                channel=_CHANNEL,
                 words=(),
             ),
         )
@@ -222,11 +227,7 @@ class TestLoadOrTranscribeChunk(unittest.TestCase):
         expected_words = [MagicMock(), MagicMock()]
         self.mock_read_words.return_value = iter(expected_words)
 
-        results = list(
-            self.transcriber._load_or_transcribe_chunk(
-                audio_chunk=self.audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR
-            )
-        )
+        results = list(self.transcriber._load_or_transcribe_chunk(audio_chunk=self.audio_chunk, cache_dir=_CACHE_DIR))
 
         self.mock_path_exists.assert_called_once_with()
         self.mock_call_whisper.assert_not_called()
@@ -241,11 +242,7 @@ class TestLoadOrTranscribeChunk(unittest.TestCase):
         transcribed_words = [MagicMock(), MagicMock()]
         self.mock_call_whisper.return_value = iter(transcribed_words)
 
-        results = list(
-            self.transcriber._load_or_transcribe_chunk(
-                audio_chunk=self.audio_chunk, channel=_CHANNEL, cache_dir=_CACHE_DIR
-            )
-        )
+        results = list(self.transcriber._load_or_transcribe_chunk(audio_chunk=self.audio_chunk, cache_dir=_CACHE_DIR))
 
         self.mock_path_exists.assert_called_once_with()
         self.mock_read_words.assert_not_called()

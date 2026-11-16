@@ -75,7 +75,6 @@ class AudioClassifier:
     def classify(
         self,
         audio_chunks: Iterable[ballroom_scribe.models.AudioChunk],
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> Generator[ballroom_scribe.models.AudioChunk]:
         """Splits audio into chunks of speech, music, and other sounds.
@@ -95,7 +94,6 @@ class AudioClassifier:
 
         Args:
             audio_chunks: The audio chunks to classify.
-            channel: The audio channel from which `audio_chunks` were loaded.
             cache_dir: The directory in which inferences will be cached.
 
         Yields:
@@ -122,7 +120,6 @@ class AudioClassifier:
             current_classified_chunks = collections.deque(
                 self._classify_chunk(
                     audio_chunk=current_unclassified_chunk,
-                    channel=channel,
                     cache_dir=cache_dir,
                 )
             )
@@ -153,14 +150,12 @@ class AudioClassifier:
     def _classify_chunk(
         self,
         audio_chunk: ballroom_scribe.models.AudioChunk,
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> Generator[ballroom_scribe.models.AudioChunk]:
         """Runs the PANN on one audio chunk and segments it by classification.
 
         Args:
             audio_chunk: The audio chunk with the `classification` property set to `UNKNOWN`.
-            channel: The audio channel from which `audio_chunk` was loaded.
             cache_dir: The directory in which inferences will be cached.
 
         Yields:
@@ -171,7 +166,7 @@ class AudioClassifier:
 
         # Split the audio chunk at the changes in classification.
         new_start_samples = audio_chunk.start_samples
-        frames = self._inferencer.infer_chunk(audio_chunk=audio_chunk, channel=channel, cache_dir=cache_dir)
+        frames = self._inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=cache_dir)
         sample_classifications_rle = self._classify_frames(
             frames=frames,
             num_samples=audio_chunk.duration_samples,

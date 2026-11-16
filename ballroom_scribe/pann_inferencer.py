@@ -45,7 +45,6 @@ class PannInferencer:
     def infer(
         self,
         audio_chunks: Iterable[ballroom_scribe.models.AudioChunk],
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> np.typing.NDArray[np.floating]:
         """Computes or loads stitched framewise probabilities across all audio chunks.
@@ -55,7 +54,6 @@ class PannInferencer:
 
         Args:
             audio_chunks: The audio chunks to process, ordered by start time with no gaps.
-            channel: The audio channel from which `audio_chunks` were loaded.
             cache_dir: The directory in which inferences are cached.
 
         Returns:
@@ -75,7 +73,6 @@ class PannInferencer:
 
             current_frames = self.infer_chunk(
                 audio_chunk=current_chunk,
-                channel=channel,
                 cache_dir=cache_dir,
             )
 
@@ -111,21 +108,19 @@ class PannInferencer:
     def infer_chunk(
         self,
         audio_chunk: ballroom_scribe.models.AudioChunk,
-        channel: int,
         cache_dir: pathlib.Path,
     ) -> np.typing.NDArray[np.floating]:
         """Loads the per-category max framewise probabilities from the cache, or computes them if not cached.
 
         Args:
             audio_chunk: The audio chunk on which to run inference.
-            channel: The audio channel from which `audio_chunk` was loaded.
             cache_dir: The directory in which inferences will be cached.
 
         Returns:
             The maximum framewise probabilities for each classification category in `PannInferencer.CLASSIFICATIONS`.
             The shape is `(num_frames, len(PannInferencer.CLASSIFICATIONS))`.
         """
-        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}-{channel}.npy"
+        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}.npy"
         if cache_file.exists():
             return np.load(cache_file)
 

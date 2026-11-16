@@ -18,7 +18,7 @@ class AudioChunk(Chunk):
         classification: The classification of the audio chunk (e.g., speech, music, other).
 
     Inherited Attributes:
-        From `Chunk`: `start_samples`, `sample_rate`, `duration_samples`. See :class:`Chunk` for details.
+        From `Chunk`: `start_samples`, `sample_rate`, `duration_samples`, `channel`. See :class:`Chunk` for details.
     """
 
     type ClassificationNumPy = np.int8
@@ -122,13 +122,16 @@ class AudioChunk(Chunk):
     def __add__(self, other):
         """Appends another AudioChunk to this one, creating a new AudioChunk that spans both.
 
-        The sample rate and classification must match. The start time of the second chunk will be ignored.
+        The sample rate, channel, and classification must match. The start time of the second chunk will be ignored.
         """
         if not isinstance(other, AudioChunk):
             raise TypeError("Can only add AudioChunk instances.")
 
         if self.sample_rate != other.sample_rate:
             raise ValueError("Sample rates must match.")
+
+        if self.channel != other.channel:
+            raise ValueError("Channels must match.")
 
         if self.classification != other.classification:
             raise ValueError("Classifications must match.")
@@ -141,6 +144,7 @@ class AudioChunk(Chunk):
             and self.start_samples == value.start_samples
             and np.array_equal(self.data, value.data)
             and self.sample_rate == value.sample_rate
+            and self.channel == value.channel
             and self.classification == value.classification
         )
 

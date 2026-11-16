@@ -8,6 +8,7 @@ import ballroom_scribe.models
 import ballroom_scribe.music_valley_detector
 
 Classification = ballroom_scribe.models.AudioChunk.Classification
+_CHANNEL = 1
 
 
 def _make_chunk(
@@ -22,6 +23,7 @@ def _make_chunk(
     return ballroom_scribe.models.AudioChunk(
         data=np.arange(start_samples, start_samples + num_samples, dtype=np.float32),
         sample_rate=sample_rate,
+        channel=_CHANNEL,
         classification=classification,
         start_samples=start_samples,
     )
@@ -155,18 +157,21 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=0,
                         sample_rate=10,
                         duration_samples=100,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(0.0, 10.0, Classification.SPEECH),),
                     ),
                     ballroom_scribe.models.MusicValley(
                         start_samples=500,
                         sample_rate=10,
                         duration_samples=300,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(50.0, 10.0, Classification.SPEECH),),
                     ),
                     ballroom_scribe.models.MusicValley(
                         start_samples=1200,
                         sample_rate=10,
                         duration_samples=50,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(120.0, 5.0, Classification.SPEECH),),
                     ),
                 ],
@@ -188,6 +193,7 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=400,
                         sample_rate=10,
                         duration_samples=83,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(43.0, 1.8, Classification.SPEECH),),
                     ),
                 ],
@@ -207,6 +213,7 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=400,
                         sample_rate=10,
                         duration_samples=100,
+                        channel=_CHANNEL,
                         speech_chunks=(
                             _make_chunk(40.0, 1.5, Classification.SPEECH),
                             _make_chunk(44.0, 6.0, Classification.SPEECH),
@@ -225,6 +232,7 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=0,
                         sample_rate=10,
                         duration_samples=40,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(0.0, 4.0, Classification.SPEECH),),
                     ),
                 ],
@@ -240,6 +248,7 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=400,
                         sample_rate=10,
                         duration_samples=50,
+                        channel=_CHANNEL,
                         speech_chunks=(_make_chunk(40.0, 5.0, Classification.SPEECH),),
                     ),
                 ],
@@ -255,6 +264,7 @@ class TestMusicValleyDetector(unittest.TestCase):
                         start_samples=400,
                         sample_rate=10,
                         duration_samples=20,
+                        channel=_CHANNEL,
                         speech_chunks=(),
                     ),
                 ],
@@ -371,6 +381,7 @@ class TestPeelFadeEdges(unittest.TestCase):
                     core_start_samples=100,
                     core_end_samples=500,
                     sample_rate=10,
+                    channel=_CHANNEL,
                     trailing_speech=(),
                 ),
             ),
@@ -391,6 +402,7 @@ class TestPeelFadeEdges(unittest.TestCase):
                     core_start_samples=190,
                     core_end_samples=590,
                     sample_rate=10,
+                    channel=_CHANNEL,
                     trailing_speech=(_make_chunk(59.0, 6.0, Classification.SPEECH | Classification.MUSIC),),
                 ),
             ),
@@ -408,6 +420,7 @@ class TestPeelFadeEdges(unittest.TestCase):
                     core_start_samples=180,
                     core_end_samples=690,
                     sample_rate=10,
+                    channel=_CHANNEL,
                     trailing_speech=(),
                 ),
             ),
@@ -426,6 +439,7 @@ class TestPeelFadeEdges(unittest.TestCase):
                     core_start_samples=100,
                     core_end_samples=200,
                     sample_rate=10,
+                    channel=_CHANNEL,
                     trailing_speech=(),
                 ),
             ),

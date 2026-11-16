@@ -17,6 +17,7 @@ class TestAudioChunk(unittest.TestCase):
         self.chunk = ballroom_scribe.models.AudioChunk(
             data=np.array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]),
             sample_rate=10,
+            channel=1,
             classification=self.classification,
             start_samples=100,
         )
@@ -158,6 +159,23 @@ class TestAudioChunk(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             self.chunk += other_chunk
+
+    def test_add_different_channel(self):
+        other_chunk = dataclasses.replace(
+            self.chunk,
+            channel=0,
+        )
+
+        with self.assertRaisesRegex(ValueError, "Channels must match."):
+            self.chunk += other_chunk
+
+    def test_eq_different_channel(self):
+        other_chunk = dataclasses.replace(
+            self.chunk,
+            channel=0,
+        )
+
+        self.assertNotEqual(self.chunk, other_chunk)
 
     def test_unknown_classification_has_distinct_bitflag(self):
         classification_cls = ballroom_scribe.models.AudioChunk.Classification
