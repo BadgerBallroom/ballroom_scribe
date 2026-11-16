@@ -341,7 +341,7 @@ def _check_video_and_waveform(fixture: _Fixture) -> None:
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=fixture.clip,
                 input_channel=1,
-                cache_dir=fixture.work_dir,
+                parent_cache_dir=fixture.work_dir,
             )
         ]
     )
@@ -2365,7 +2365,7 @@ def _check_close_during_extraction(fixture: _Fixture) -> None:
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=fixture.long_clip,
                 input_channel=0,
-                cache_dir=fixture.work_dir,
+                parent_cache_dir=fixture.work_dir,
             )
         ]
     )
@@ -2952,7 +2952,7 @@ def _check_offline_videos(fixture: _Fixture) -> None:
                 ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=found_dir / name,
                     input_channel=0,
-                    cache_dir=found_dir,
+                    parent_cache_dir=found_dir,
                 )
             ],
             relink_policy=relink_policy,

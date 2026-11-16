@@ -29,7 +29,7 @@ def _build_command(
                 str(video_input["input_video"]),
                 str(video_input["input_channel"]),
                 "-c",
-                str(video_input["cache_dir"]),
+                str(video_input["parent_cache_dir"]),
             )
         )
     command.extend(("--output-csv", str(output_csv)))

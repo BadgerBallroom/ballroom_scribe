@@ -46,7 +46,7 @@ class PipelineDialog(QtWidgets.QDialog):
                 [
                     str(item_args["input_video"]),
                     str(item_args["input_channel"]),
-                    str(item_args["cache_dir"]),
+                    str(item_args["parent_cache_dir"]),
                 ],
             )
         for col in range(3):

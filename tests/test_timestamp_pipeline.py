@@ -175,12 +175,12 @@ class TestPipeline(unittest.TestCase):
                 ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=_INPUT_VIDEO_A,
                     input_channel=_INPUT_CHANNEL_A,
-                    cache_dir=_PARENT_CACHE_DIR_A,
+                    parent_cache_dir=_PARENT_CACHE_DIR_A,
                 ),
                 ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=_INPUT_VIDEO_B,
                     input_channel=_INPUT_CHANNEL_B,
-                    cache_dir=_PARENT_CACHE_DIR_B,
+                    parent_cache_dir=_PARENT_CACHE_DIR_B,
                 ),
             ],
             output_csv=_OUTPUT_CSV,
@@ -325,12 +325,12 @@ class TestPipeline(unittest.TestCase):
                     ballroom_scribe.cli.arguments.InputCacheArgs(
                         input_video=_INPUT_VIDEO_A,
                         input_channel=_INPUT_CHANNEL_A,
-                        cache_dir=_PARENT_CACHE_DIR_A,
+                        parent_cache_dir=_PARENT_CACHE_DIR_A,
                     ),
                     ballroom_scribe.cli.arguments.InputCacheArgs(
                         input_video=_INPUT_VIDEO_B,
                         input_channel=_INPUT_CHANNEL_B,
-                        cache_dir=_PARENT_CACHE_DIR_B,
+                        parent_cache_dir=_PARENT_CACHE_DIR_B,
                     ),
                 ],
                 output_csv=_OUTPUT_CSV,
@@ -349,12 +349,12 @@ class TestPipeline(unittest.TestCase):
                     ballroom_scribe.cli.arguments.InputCacheArgs(
                         input_video=_INPUT_VIDEO_A,
                         input_channel=_INPUT_CHANNEL_A,
-                        cache_dir=_PARENT_CACHE_DIR_A,
+                        parent_cache_dir=_PARENT_CACHE_DIR_A,
                     ),
                     ballroom_scribe.cli.arguments.InputCacheArgs(
                         input_video=_INPUT_VIDEO_B,
                         input_channel=_INPUT_CHANNEL_B,
-                        cache_dir=_PARENT_CACHE_DIR_B,
+                        parent_cache_dir=_PARENT_CACHE_DIR_B,
                     ),
                 ],
                 output_csv=_OUTPUT_CSV,

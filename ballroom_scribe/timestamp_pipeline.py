@@ -38,18 +38,18 @@ class _Video:
     cache_dir: pathlib.Path
 
 
-def _resolve_video(input_video: pathlib.Path, input_channel: int, cache_dir: pathlib.Path) -> _Video:
+def _resolve_video(input_video: pathlib.Path, input_channel: int, parent_cache_dir: pathlib.Path) -> _Video:
     """Pairs an input video with its own cache directory inside the given parent cache directory.
 
     Args:
         input_video: The path to the input video file.
         input_channel: The audio channel to extract from the input video.
-        cache_dir: The parent directory in which the video's cache directory lives.
+        parent_cache_dir: The parent directory in which the video's cache directory lives.
     """
     return _Video(
         input_video=input_video,
         input_channel=input_channel,
-        cache_dir=ballroom_scribe.utils.cache_dir_for_video(parent_cache_dir=cache_dir, input_video=input_video),
+        cache_dir=ballroom_scribe.utils.cache_dir_for_video(parent_cache_dir=parent_cache_dir, input_video=input_video),
     )
 
 

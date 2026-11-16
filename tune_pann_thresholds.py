@@ -26,14 +26,14 @@ _STREAM_CHUNK_BYTES = 1024 * 1024  # 1 MB
 def load_probabilities(
     input_video: pathlib.Path,
     input_channel: int,
-    cache_dir: pathlib.Path,
+    parent_cache_dir: pathlib.Path,
     pann_device: str,
     pann_chunk_minutes: float,
     pann_chunk_overlap_seconds: float,
 ) -> tuple[np.typing.NDArray[np.float32], float]:
     """Loads or computes stitched framewise probabilities and total audio duration in seconds."""
     cache_dir = ballroom_scribe.utils.cache_dir_for_video(
-        parent_cache_dir=cache_dir,
+        parent_cache_dir=parent_cache_dir,
         input_video=input_video,
     )
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -464,7 +464,7 @@ def main() -> None:
     probabilities, duration_seconds = load_probabilities(
         input_video=input_cache_args["input_video"],
         input_channel=input_cache_args["input_channel"],
-        cache_dir=input_cache_args["cache_dir"],
+        parent_cache_dir=input_cache_args["parent_cache_dir"],
         pann_device=audio_classification_args["pann_device"],
         pann_chunk_minutes=audio_classification_args["pann_chunk_minutes"],
         pann_chunk_overlap_seconds=audio_classification_args["pann_chunk_overlap_seconds"],

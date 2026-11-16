@@ -356,7 +356,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 loaded = self._session.add(
                     input_video=video_path,
                     input_channel=video_args["input_channel"],
-                    parent_cache_dir=video_args["cache_dir"],
+                    parent_cache_dir=video_args["parent_cache_dir"],
                 )
             except (ValueError, subprocess.CalledProcessError, OSError) as err:
                 QtWidgets.QMessageBox.warning(
@@ -1102,7 +1102,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     pathlib.Path(raw_path),
                     pathlib.Path(raw_path).parent,
                 ),
-                cache_dir=pathlib.Path(raw_path).parent,
+                parent_cache_dir=pathlib.Path(raw_path).parent,
             )
             for raw_path in paths
         ]

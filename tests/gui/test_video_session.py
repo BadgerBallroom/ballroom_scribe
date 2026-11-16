@@ -46,7 +46,7 @@ class TestVideoSession(unittest.TestCase):
                 ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=pathlib.Path("/workspace/videos/session1.mp4"),
                     input_channel=1,
-                    cache_dir=pathlib.Path("videos"),
+                    parent_cache_dir=pathlib.Path("videos"),
                 )
             ],
         )

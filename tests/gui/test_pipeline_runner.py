@@ -29,12 +29,12 @@ class TestBuildCommand(unittest.TestCase):
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=_VIDEO_A,
                 input_channel=0,
-                cache_dir=_CACHE_A,
+                parent_cache_dir=_CACHE_A,
             ),
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=_VIDEO_B,
                 input_channel=2,
-                cache_dir=_CACHE_B,
+                parent_cache_dir=_CACHE_B,
             ),
         ]
 
@@ -99,7 +99,7 @@ class TestPipelineRunner(unittest.TestCase):
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=pathlib.Path("clip.mp4"),
                 input_channel=1,
-                cache_dir=pathlib.Path("."),
+                parent_cache_dir=pathlib.Path("."),
             )
         ]
         runner.start(inputs=inputs, output_csv=pathlib.Path("clip.csv"))

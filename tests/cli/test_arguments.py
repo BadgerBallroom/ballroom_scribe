@@ -23,7 +23,7 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/input.mp4"),
                             input_channel=1,
-                            cache_dir=pathlib.Path("path/to"),
+                            parent_cache_dir=pathlib.Path("path/to"),
                         ),
                     ],
                     output_csv=pathlib.Path("path/to/input.csv"),
@@ -45,7 +45,7 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/input.mp4"),
                             input_channel=2,
-                            cache_dir=pathlib.Path("custom_cache_dir"),
+                            parent_cache_dir=pathlib.Path("custom_cache_dir"),
                         ),
                     ],
                     output_csv=pathlib.Path("custom_output.csv"),
@@ -68,12 +68,12 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/a.mp4"),
                             input_channel=1,
-                            cache_dir=pathlib.Path("path/to"),
+                            parent_cache_dir=pathlib.Path("path/to"),
                         ),
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("other/b.mp4"),
                             input_channel=0,
-                            cache_dir=pathlib.Path("other"),
+                            parent_cache_dir=pathlib.Path("other"),
                         ),
                     ],
                     output_csv=pathlib.Path("combined.csv"),
@@ -100,12 +100,12 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/a.mp4"),
                             input_channel=1,
-                            cache_dir=pathlib.Path("cache_a"),
+                            parent_cache_dir=pathlib.Path("cache_a"),
                         ),
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("other/b.mp4"),
                             input_channel=0,
-                            cache_dir=pathlib.Path("cache_b"),
+                            parent_cache_dir=pathlib.Path("cache_b"),
                         ),
                     ],
                     output_csv=pathlib.Path("combined.csv"),
@@ -130,12 +130,12 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/a.mp4"),
                             input_channel=1,
-                            cache_dir=pathlib.Path("path/to"),
+                            parent_cache_dir=pathlib.Path("path/to"),
                         ),
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("other/b.mp4"),
                             input_channel=0,
-                            cache_dir=pathlib.Path("cache_b"),
+                            parent_cache_dir=pathlib.Path("cache_b"),
                         ),
                     ],
                     output_csv=pathlib.Path("combined.csv"),
@@ -275,7 +275,7 @@ class TestParseArgs(unittest.TestCase):
                 expected=ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=pathlib.Path("path/to/input.mp4"),
                     input_channel=1,
-                    cache_dir=pathlib.Path("path/to"),
+                    parent_cache_dir=pathlib.Path("path/to"),
                 ),
             ),
             param(
@@ -284,7 +284,7 @@ class TestParseArgs(unittest.TestCase):
                 expected=ballroom_scribe.cli.arguments.InputCacheArgs(
                     input_video=pathlib.Path("path/to/input.mp4"),
                     input_channel=2,
-                    cache_dir=pathlib.Path("custom_cache_dir"),
+                    parent_cache_dir=pathlib.Path("custom_cache_dir"),
                 ),
             ),
         ]
@@ -335,12 +335,12 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/a.mp4"),
                             input_channel=0,
-                            cache_dir=pathlib.Path("cache_a"),
+                            parent_cache_dir=pathlib.Path("cache_a"),
                         ),
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("other/b.mp4"),
                             input_channel=1,
-                            cache_dir=pathlib.Path("other"),
+                            parent_cache_dir=pathlib.Path("other"),
                         ),
                     ],
                     csv=None,
@@ -359,7 +359,7 @@ class TestParseArgs(unittest.TestCase):
                         ballroom_scribe.cli.arguments.InputCacheArgs(
                             input_video=pathlib.Path("path/to/c.mp4"),
                             input_channel=0,
-                            cache_dir=pathlib.Path("path/to"),
+                            parent_cache_dir=pathlib.Path("path/to"),
                         ),
                     ],
                     csv=pathlib.Path("path/to/events.csv"),

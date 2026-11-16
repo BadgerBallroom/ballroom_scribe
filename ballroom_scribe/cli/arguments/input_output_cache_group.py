@@ -11,7 +11,7 @@ from .group_abc import Group, GroupArgs
 class InputCacheArgs(GroupArgs):
     input_video: pathlib.Path
     input_channel: int
-    cache_dir: pathlib.Path
+    parent_cache_dir: pathlib.Path
 
 
 class InputOutputCacheArgs(GroupArgs):
@@ -115,7 +115,7 @@ class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
                 self._input_action,
                 f"Expected at most {self._max_inputs} video(s), got {len(raw_inputs)}",
             )
-        cache_dirs: dict[int, pathlib.Path] = args.cache_dir or {}
+        parent_cache_dirs: dict[int, pathlib.Path] = args.cache_dir or {}
         inputs: list[InputCacheArgs] = []
         for index, (video, channel) in enumerate(raw_inputs):
             input_video = pathlib.Path(video)
@@ -123,7 +123,7 @@ class _InputCacheGroupBase[Resolved: GroupArgs](Group[Resolved]):
                 InputCacheArgs(
                     input_video=input_video,
                     input_channel=_parse_channel(self._input_action, channel),
-                    cache_dir=cache_dirs.get(index, input_video.parent),
+                    parent_cache_dir=parent_cache_dirs.get(index, input_video.parent),
                 )
             )
         return inputs

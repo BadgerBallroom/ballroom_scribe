@@ -315,7 +315,7 @@ class VideoSession:
             ballroom_scribe.cli.arguments.InputCacheArgs(
                 input_video=video.input_video,
                 input_channel=video.input_channel,
-                cache_dir=video.parent_cache_dir,
+                parent_cache_dir=video.parent_cache_dir,
             )
             for video in self.loaded_videos
         ]
