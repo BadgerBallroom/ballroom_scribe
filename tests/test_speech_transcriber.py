@@ -137,6 +137,7 @@ class TestInit(unittest.TestCase):
         [
             param("model", whisper_init_kwargs={"model_size_or_path": "large-v3"}),
             param("device", whisper_init_kwargs={"device": "cpu"}),
+            param("device_index", whisper_init_kwargs={"device_index": 1}),
             param("compute_type", whisper_init_kwargs={"compute_type": "int8"}),
             param("cpu_threads", whisper_init_kwargs={"cpu_threads": 8}),
         ]
@@ -149,12 +150,17 @@ class TestInit(unittest.TestCase):
     @parameterized.expand(
         [
             param("auto", whisper_device="auto"),
-            param("indexed", whisper_device="cuda:1"),
+            param("unsupported_backend", whisper_device="mps"),
+            param("cpu_with_index", whisper_device="cpu:0"),
+            param("negative_cuda_index", whisper_device="cuda:-1"),
+            param("leading_zero_cuda_index", whisper_device="cuda:01"),
+            param("non_numeric_cuda_index", whisper_device="cuda:foo"),
         ]
     )
     def test_init_rejects_unknown_device(self, _, whisper_device):
         with self.assertRaisesRegex(
-            ValueError, rf"whisper_device must be one of \['cpu', 'cuda'\], got '{whisper_device}'"
+            ValueError,
+            f"whisper_device must be 'cpu', 'cuda', or 'cuda:<index>', got {whisper_device!r}",
         ):
             _make_transcriber(whisper_device=whisper_device)
         self.mock_validate_torch_device.assert_not_called()
@@ -178,6 +184,27 @@ class TestInit(unittest.TestCase):
             {
                 "model_size_or_path": "large-v3",
                 "device": whisper_device,
+                "compute_type": "float16",
+                "cpu_threads": _CPU_THREADS,
+            },
+        )
+
+    @parameterized.expand(
+        [
+            param("cuda_0", whisper_device="cuda:0", expected_index=0),
+            param("cuda_1", whisper_device="cuda:1", expected_index=1),
+        ]
+    )
+    def test_init_splits_indexed_cuda_device(self, _, whisper_device, expected_index):
+        transcriber = _make_transcriber(whisper_device=whisper_device)
+
+        self.mock_validate_torch_device.assert_called_once_with(whisper_device)
+        self.assertEqual(
+            transcriber._whisper_init_kwargs,
+            {
+                "model_size_or_path": "large-v3",
+                "device": "cuda",
+                "device_index": expected_index,
                 "compute_type": "float16",
                 "cpu_threads": _CPU_THREADS,
             },

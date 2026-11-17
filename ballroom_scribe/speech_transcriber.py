@@ -4,6 +4,7 @@ import functools
 import inspect
 import os
 import pathlib
+import re
 import sys
 from collections.abc import Generator, Iterable, Mapping
 from typing import Any
@@ -49,9 +50,9 @@ import ballroom_scribe.models
 import ballroom_scribe.utils
 
 _CTRANSLATE2_EXTRA_KWARGS = frozenset({"max_queued_batches", "flash_attention", "tensor_parallel"})
-_WHISPER_DEVICES = frozenset({"cuda", "cpu"})
+_WHISPER_DEVICE_RE = re.compile(r"cpu|cuda(?::(?:0|[1-9][0-9]*))?")
 # Keyword arguments of `WhisperModel.__init__` that `SpeechTranscriber` sets from its own parameters.
-_DEDICATED_INIT_KWARGS = frozenset({"model_size_or_path", "device", "compute_type", "cpu_threads"})
+_DEDICATED_INIT_KWARGS = frozenset({"model_size_or_path", "device", "device_index", "compute_type", "cpu_threads"})
 
 
 def _flatten_segments_to_words(
@@ -111,8 +112,8 @@ class SpeechTranscriber:
         """Initializes the instance.
 
         Args:
-            whisper_device: `"cuda"` or `"cpu"`. (`SpeechTranscriptionGroup` resolves `auto` to one of these with the
-                same rule `PannInferencer` uses.)
+            whisper_device: `"cpu"`, `"cuda"`, or `"cuda:<index>"`. (`SpeechTranscriptionGroup` resolves `"auto"` to
+                `"cuda"` or `"cpu"` with the same rule `PannInferencer` uses.)
             whisper_model: The Faster Whisper model: a size such as `"large-v3"` or `"turbo"`, a HuggingFace
                 repository, or a local directory.
             whisper_compute_type: The CTranslate2 compute type, e.g. `"float16"` or `"int8"`.
@@ -120,27 +121,30 @@ class SpeechTranscriber:
                 Whisper's own default (`OMP_NUM_THREADS`, else 4). CTranslate2 ignores it on CUDA.
             whisper_beam_size: The beam size to use for decoding.
             whisper_init_kwargs: Additional keyword arguments passed unchanged to `WhisperModel.__init__`, such as
-                `device_index` or `local_files_only`. Must not contain `model_size_or_path`, `device`, `compute_type`,
-                or `cpu_threads`.
+                `download_root` or `local_files_only`. Must not contain `model_size_or_path`, `device`, `device_index`,
+                `compute_type`, or `cpu_threads`.
 
         Raises:
             TypeError: If `whisper_init_kwargs` contains a dedicated key or does not match `WhisperModel.__init__`.
-            ValueError: If `whisper_device` is not `cuda` or `cpu`, if it is `cuda` while CUDA is not available, or if
-                `whisper_cpu_threads` is negative.
+            ValueError: If `whisper_device` is not `'cpu'`, `'cuda'`, or `'cuda:<index>'`, if the device is unusable, or
+                if `whisper_cpu_threads` is negative.
         """
         if dedicated := _DEDICATED_INIT_KWARGS & whisper_init_kwargs.keys():
             raise TypeError(
                 f"whisper_init_kwargs must not contain {', '.join(sorted(dedicated))}; use the dedicated parameters."
             )
-        if whisper_device not in _WHISPER_DEVICES:
-            raise ValueError(f"whisper_device must be one of {sorted(_WHISPER_DEVICES)}, got {whisper_device!r}.")
+        if _WHISPER_DEVICE_RE.fullmatch(whisper_device) is None:
+            raise ValueError(f"whisper_device must be 'cpu', 'cuda', or 'cuda:<index>', got {whisper_device!r}.")
         ballroom_scribe.utils.validate_torch_device(whisper_device)
         if whisper_cpu_threads < 0:
             raise ValueError(f"whisper_cpu_threads must be 0 or positive, got {whisper_cpu_threads}.")
 
-        self._whisper_init_kwargs = {
+        # CTranslate2 takes `"cuda"` and `device_index` as separate arguments, so split any `:index` suffix.
+        device, _, index_text = whisper_device.partition(":")
+        self._whisper_init_kwargs: dict[str, Any] = {
             "model_size_or_path": whisper_model,
-            "device": whisper_device,
+            "device": device,
+            **({"device_index": int(index_text)} if index_text else {}),
             "compute_type": whisper_compute_type,
             "cpu_threads": whisper_cpu_threads,
             **whisper_init_kwargs,
@@ -161,8 +165,13 @@ class SpeechTranscriber:
     def _whisper_model(self) -> faster_whisper.WhisperModel:
         """Initializes the Faster Whisper model."""
         model = faster_whisper.WhisperModel(**self._whisper_init_kwargs)
+        device_label = (
+            f"{model.model.device}:{self._whisper_init_kwargs['device_index']}"
+            if "device_index" in self._whisper_init_kwargs
+            else model.model.device
+        )
         print(
-            f"Loaded Faster Whisper model {self._whisper_init_kwargs['model_size_or_path']} on {model.model.device}"
+            f"Loaded Faster Whisper model {self._whisper_init_kwargs['model_size_or_path']} on {device_label}"
             f" using compute type {model.model.compute_type}."
         )
         return model

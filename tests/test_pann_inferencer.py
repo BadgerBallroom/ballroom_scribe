@@ -42,6 +42,29 @@ class TestInit(unittest.TestCase):
         self.mock_resolve_torch_device.assert_called_once_with("auto")
 
 
+class TestSoundEventDetection(unittest.TestCase):
+    """Unit tests for the `PannInferencer._sound_event_detection` property."""
+
+    def setUp(self):
+        self.mock_resolve_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
+        )
+        self.mock_sed_cls = self.enterContext(patch.object(panns_inference, "SoundEventDetection", autospec=True))
+        self.mock_sed = self.mock_sed_cls.return_value
+        self.mock_sed.device = "cpu"
+        self.mock_sed.model = MagicMock()
+
+    def test_uses_resolved_device(self):
+        self.mock_resolve_torch_device.return_value = "cuda:1"
+        inferencer = ballroom_scribe.PannInferencer(device="cuda:1")
+
+        sed = inferencer._sound_event_detection
+
+        self.mock_sed_cls.assert_called_once()
+        self.assertEqual(sed.device, "cuda:1")
+        self.mock_sed.model.to.assert_called_once_with("cuda:1")
+
+
 class TestInfer(unittest.TestCase):
     """Unit tests for the `PannInferencer.infer` method."""
 
@@ -193,7 +216,7 @@ class TestInferChunk(unittest.TestCase):
         self.mock_partial_cache_file = MagicMock(spec=pathlib.Path)
         self.mock_atomic_path.return_value.__enter__.return_value = self.mock_partial_cache_file
 
-        # The resolved device, not the requested one, must reach `SoundEventDetection`.
+        # The resolved device, not the requested one, must reach `_sound_event_detection`.
         self.inferencer = ballroom_scribe.PannInferencer(device="auto")
 
     def test_lazy_loads_sound_event_detection(self):
@@ -204,7 +227,9 @@ class TestInferChunk(unittest.TestCase):
         self.mock_sed_cls.assert_not_called()
         self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
         self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
-        self.mock_sed_cls.assert_called_once_with(device="cuda")
+        self.mock_sed_cls.assert_called_once_with(device="cpu")
+        self.assertEqual(self.inferencer._sound_event_detection.device, "cuda")
+        self.mock_sed.model.to.assert_called_once_with("cuda")
 
     def test_cache_hit_loads_inference_from_cache(self):
         self.mock_path_exists.return_value = True

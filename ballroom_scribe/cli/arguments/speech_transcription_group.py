@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 from collections.abc import Mapping
 from typing import override
 
@@ -8,20 +9,31 @@ import ballroom_scribe.utils
 from .group_abc import Group, GroupArgs
 from .json_loads_type import json_loads_dict
 
-_WHISPER_DEVICES = ("auto", "cuda", "cpu")
+_WHISPER_DEVICE_RE = re.compile(r"auto|cpu|cuda(?::(?:0|[1-9][0-9]*))?")
 # Keyword arguments of `WhisperModel.__init__` that have their own flags and so must not appear in
 # `--whisper-init-kwargs`.
 _DEDICATED_INIT_KWARGS = {
     "model_size_or_path": "--whisper-model",
     "device": "--whisper-device",
+    "device_index": "--whisper-device",
     "compute_type": "--whisper-compute-type",
     "cpu_threads": "--whisper-cpu-threads",
 }
 
 
 def _resolve_for_device(value: str | Mapping[str, str], device: str) -> str:
-    """Returns `value` itself, or its entry for `device` when it maps device names to values, as the defaults do."""
-    return value[device] if isinstance(value, Mapping) else value
+    """Returns `value` itself, or its entry for `device`'s type (`"cuda"` or `"cpu"`) when it maps device names."""
+    if not isinstance(value, Mapping):
+        return value
+    device_type, _, _ = device.partition(":")
+    return value[device_type]
+
+
+def _whisper_device(value: str) -> str:
+    """Validates a `--whisper-device` argument string."""
+    if _WHISPER_DEVICE_RE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(f"Expected 'auto', 'cpu', 'cuda', or 'cuda:<index>', got {value!r}")
+    return value
 
 
 class SpeechTranscriptionArgs(GroupArgs):
@@ -50,11 +62,11 @@ class SpeechTranscriptionGroup(Group[SpeechTranscriptionArgs]):
         group = parser.add_argument_group("Speech Transcription", "Transcribing spoken audio into text")
         self._device_action = group.add_argument(
             "--whisper-device",
-            choices=_WHISPER_DEVICES,
+            type=_whisper_device,
             default="auto",
             help=(
-                "The device on which to run Faster Whisper; 'auto' uses CUDA when it is available and the CPU"
-                " otherwise (default: %(default)s)"
+                "The device on which to run Faster Whisper ('auto', 'cpu', 'cuda', or 'cuda:<index>'); 'auto' uses"
+                " CUDA when it is available and the CPU otherwise (default: %(default)s)"
             ),
         )
         # argparse applies `type` only to string defaults, so these mapping defaults are used as-is while values given
@@ -97,7 +109,7 @@ class SpeechTranscriptionGroup(Group[SpeechTranscriptionArgs]):
             default={},
             help=(
                 "A JSON dictionary of additional keyword arguments to pass unchanged to WhisperModel.__init__, such"
-                " as device_index or local_files_only (default: %(default)s)"
+                " as download_root or local_files_only (default: %(default)s)"
             ),
         )
 

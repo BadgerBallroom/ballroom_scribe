@@ -16,8 +16,7 @@ def resolve_torch_device(device: str) -> str:
             string such as `"cpu"`, `"cuda"`, or `"cuda:1"`.
 
     Returns:
-        The concrete device string. `"auto"` resolves to plain `"cuda"` rather than `"cuda:0"` because
-        `panns_inference.SoundEventDetection` only uses the GPU when its device is exactly `"cuda"`.
+        The concrete PyTorch device string (`"cuda"` or `"cpu"` for `"auto"`, or `device` itself).
 
     Raises:
         ValueError: If an explicit device requests CUDA while CUDA is not available, or names a CUDA device index that

@@ -532,9 +532,18 @@ class TestParseArgs(unittest.TestCase):
                 expected_message="argument --max-dip-speech-seconds: invalid float value: 'foo'",
             ),
             param(
-                "speech_transcription_whisper_device_invalid_choice",
+                "speech_transcription_whisper_device_invalid",
                 args=["-i", "path/to/input.mp4", "1", "--whisper-device", "gpu"],
-                expected_message="argument --whisper-device: invalid choice: 'gpu'",
+                expected_message=(
+                    "argument --whisper-device: Expected 'auto', 'cpu', 'cuda', or 'cuda:<index>', got 'gpu'"
+                ),
+            ),
+            param(
+                "speech_transcription_whisper_device_invalid_cuda_index",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-device", "cuda:-1"],
+                expected_message=(
+                    "argument --whisper-device: Expected 'auto', 'cpu', 'cuda', or 'cuda:<index>', got 'cuda:-1'"
+                ),
             ),
             param(
                 "speech_transcription_whisper_init_kwargs_not_a_dict",
@@ -550,6 +559,13 @@ class TestParseArgs(unittest.TestCase):
                 "speech_transcription_whisper_init_kwargs_device_key",
                 args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"device": "cpu"}'],
                 expected_message="argument --whisper-init-kwargs: Use --whisper-device instead of the 'device' key",
+            ),
+            param(
+                "speech_transcription_whisper_init_kwargs_device_index_key",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"device_index": 1}'],
+                expected_message=(
+                    "argument --whisper-init-kwargs: Use --whisper-device instead of the 'device_index' key"
+                ),
             ),
             param(
                 "speech_transcription_whisper_init_kwargs_compute_type_key",
@@ -659,6 +675,14 @@ class TestParseArgs(unittest.TestCase):
                 args=["--whisper-device", "cuda"],
                 resolved_device="cuda",
                 expected_requested="cuda",
+                expected_model="large-v3",
+                expected_compute_type="float16",
+            ),
+            param(
+                "explicit_indexed_cuda_device",
+                args=["--whisper-device", "cuda:1"],
+                resolved_device="cuda:1",
+                expected_requested="cuda:1",
                 expected_model="large-v3",
                 expected_compute_type="float16",
             ),

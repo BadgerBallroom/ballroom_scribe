@@ -40,7 +40,14 @@ class PannInferencer:
     @functools.cached_property
     def _sound_event_detection(self) -> panns_inference.SoundEventDetection:
         """The sound event detection model."""
-        return panns_inference.SoundEventDetection(device=self._device)
+        # Work around a bug in `panns_inference.SoundEventDetection`: its `__init__` checks `device == "cuda"`
+        # literally (silently falling back to `"cpu"` for indexed devices such as `"cuda:1"`) and wraps the model in
+        # `torch.nn.DataParallel` (which runs single-chunk batches on `cuda:0`). Initialize on `"cpu"` first and move
+        # the model onto `self._device` ourselves.
+        sed = panns_inference.SoundEventDetection(device="cpu")
+        sed.device = self._device
+        sed.model.to(self._device)
+        return sed
 
     def infer(
         self,
