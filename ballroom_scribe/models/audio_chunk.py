@@ -4,7 +4,6 @@ from typing import Self, override
 
 import librosa
 import numpy as np
-import soundfile
 
 from .chunk_abc import Chunk
 
@@ -42,7 +41,7 @@ class AudioChunk(Chunk):
             To convert back to the enum type, pass the integer to the constructor, e.g. `Classification(np.int8(3))`."""
             return np.int8(self)
 
-    data: soundfile.AudioData
+    data: np.typing.NDArray[np.number]
     classification: Classification
     duration_samples: int = field(init=False)
 

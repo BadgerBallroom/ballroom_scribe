@@ -73,7 +73,10 @@ class AudioLoader:
 
             # `SoundFile.blocks` yields blocks of the same length until the last block. This is not what we want; the
             # first block should be slightly shorter because it is only extended by the overlap duration at the end.
-            new_block = f.read(frames=self._core_samples + self._overlap_samples, dtype=self.DTYPE)
+            new_block = np.asarray(
+                f.read(frames=self._core_samples + self._overlap_samples, dtype=self.DTYPE),
+                dtype=self.DTYPE,
+            )
             yield self._make_audio_chunk(start_samples=0, data=new_block, channel=channel)
             start_samples = new_block.shape[0]
 
@@ -100,7 +103,7 @@ class AudioLoader:
         self,
         *,
         start_samples: int,
-        data: soundfile.AudioData,
+        data: np.typing.NDArray[np.number],
         channel: int,
     ) -> ballroom_scribe.models.AudioChunk:
         return ballroom_scribe.models.AudioChunk(

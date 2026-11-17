@@ -20,7 +20,7 @@ _SECONDS_PER_SAMPLE = 0.1
 class FakeReadSideEffect:
     """A fake `soundfile.SoundFile.read` function. Performs in-place mutations like the real function."""
 
-    def __init__(self, chunks: Iterable[soundfile.AudioData]):
+    def __init__(self, chunks: Iterable[np.typing.NDArray[np.number]]):
         """Initializes the instance.
 
         Args:
