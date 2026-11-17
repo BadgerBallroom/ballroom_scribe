@@ -1,10 +1,9 @@
-# PyTorch with CUDA 13.2 support
---extra-index-url https://download.pytorch.org/whl/cu132
-torch==2.14.0+cu132
+# Dependencies for machines without an NVIDIA GPU (and the base of requirements-cuda.txt).
 
-# Explicit CUDA 12 libraries required by CTranslate2 inside Faster Whisper
-nvidia-cublas-cu12==12.9.2.10
-nvidia-cudnn-cu12==9.26.0.51
+# PyTorch from PyPI, whose Windows and macOS wheels have no CUDA support and are a fraction of the size of the CUDA
+# build. (PyPI's Linux wheel bundles CUDA; use `--extra-index-url https://download.pytorch.org/whl/cpu` and
+# `torch==2.14.0+cpu` there.)
+torch==2.14.0
 
 # Audio classification and transcription
 faster-whisper==1.2.1

@@ -1,17 +1,34 @@
 import argparse
+import os
 import pathlib
 import re
 import unittest
+from unittest.mock import patch
 
 import ollama
 from parameterized import param, parameterized
 
 import ballroom_scribe.cli.arguments
 import ballroom_scribe.models
+import ballroom_scribe.utils
+
+# The number of logical processors that the mocked `os.process_cpu_count` reports; `--whisper-cpu-threads` defaults
+# to it.
+_CPU_THREADS = 12
 
 
 class TestParseArgs(unittest.TestCase):
     """Unit tests for the `parse_args` function."""
+
+    def setUp(self):
+        self.mock_process_cpu_count = self.enterContext(patch.object(os, "process_cpu_count", autospec=True))
+        self.mock_process_cpu_count.return_value = _CPU_THREADS
+
+        # `SpeechTranscriptionGroup.resolve` asks PyTorch which device `--whisper-device auto` means.
+        self.mock_resolve_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
+        )
+        self.mock_resolve_torch_device.return_value = "cpu"
 
     @parameterized.expand(
         [
@@ -142,6 +159,20 @@ class TestParseArgs(unittest.TestCase):
                 ),
             ),
             param(
+                "audio_classification_defaults",
+                args=["-i", "path/to/input.mp4", "1"],
+                expected=ballroom_scribe.cli.arguments.AudioClassificationArgs(
+                    pann_device="auto",
+                    pann_chunk_minutes=10.0,
+                    pann_chunk_overlap_seconds=2.0,
+                    pann_thresholds={
+                        ballroom_scribe.models.AudioChunk.Classification.SPEECH: 0.18,
+                        ballroom_scribe.models.AudioChunk.Classification.MUSIC: 0.45,
+                    },
+                    pann_min_chunk_seconds=1.0,
+                ),
+            ),
+            param(
                 "audio_classification",
                 args=[
                     "-i",
@@ -204,19 +235,43 @@ class TestParseArgs(unittest.TestCase):
                 ),
             ),
             param(
+                "speech_transcription_defaults",
+                args=["-i", "path/to/input.mp4", "1"],
+                expected=ballroom_scribe.cli.arguments.SpeechTranscriptionArgs(
+                    whisper_device="cpu",
+                    whisper_model="turbo",
+                    whisper_compute_type="int8",
+                    whisper_cpu_threads=_CPU_THREADS,
+                    whisper_beam_size=5,
+                    whisper_init_kwargs={},
+                ),
+            ),
+            param(
                 "speech_transcription",
                 args=[
                     "-i",
                     "path/to/input.mp4",
                     "1",
-                    "--whisper-init-kwargs",
-                    '{"model_size_or_path": "fake-size"}',
+                    "--whisper-device",
+                    "cpu",
+                    "--whisper-model",
+                    "fake-size",
+                    "--whisper-compute-type",
+                    "int8",
+                    "--whisper-cpu-threads",
+                    "3",
                     "--whisper-beam-size",
                     "321",
+                    "--whisper-init-kwargs",
+                    '{"local_files_only": true}',
                 ],
                 expected=ballroom_scribe.cli.arguments.SpeechTranscriptionArgs(
-                    whisper_init_kwargs={"model_size_or_path": "fake-size"},
+                    whisper_device="cpu",
+                    whisper_model="fake-size",
+                    whisper_compute_type="int8",
+                    whisper_cpu_threads=3,
                     whisper_beam_size=321,
+                    whisper_init_kwargs={"local_files_only": True},
                 ),
             ),
             param(
@@ -477,9 +532,41 @@ class TestParseArgs(unittest.TestCase):
                 expected_message="argument --max-dip-speech-seconds: invalid float value: 'foo'",
             ),
             param(
+                "speech_transcription_whisper_device_invalid_choice",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-device", "gpu"],
+                expected_message="argument --whisper-device: invalid choice: 'gpu'",
+            ),
+            param(
                 "speech_transcription_whisper_init_kwargs_not_a_dict",
                 args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '["not", "a", "dict"]'],
                 expected_message="argument --whisper-init-kwargs: Expected a JSON dictionary, got <class 'list'>",
+            ),
+            param(
+                "speech_transcription_whisper_init_kwargs_model_key",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"model_size_or_path": "turbo"}'],
+                expected_message="argument --whisper-init-kwargs: Use --whisper-model instead of the 'model_size_or_path' key",
+            ),
+            param(
+                "speech_transcription_whisper_init_kwargs_device_key",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"device": "cpu"}'],
+                expected_message="argument --whisper-init-kwargs: Use --whisper-device instead of the 'device' key",
+            ),
+            param(
+                "speech_transcription_whisper_init_kwargs_compute_type_key",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"compute_type": "int8"}'],
+                expected_message=(
+                    "argument --whisper-init-kwargs: Use --whisper-compute-type instead of the 'compute_type' key"
+                ),
+            ),
+            param(
+                "speech_transcription_whisper_init_kwargs_cpu_threads_key",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-init-kwargs", '{"cpu_threads": 8}'],
+                expected_message="argument --whisper-init-kwargs: Use --whisper-cpu-threads instead of the 'cpu_threads' key",
+            ),
+            param(
+                "speech_transcription_whisper_cpu_threads_not_a_number",
+                args=["-i", "path/to/input.mp4", "1", "--whisper-cpu-threads", "foo"],
+                expected_message="argument --whisper-cpu-threads: invalid int value: 'foo'",
             ),
             param(
                 "speech_transcription_whisper_beam_size_not_a_number",
@@ -531,6 +618,88 @@ class TestParseArgs(unittest.TestCase):
     def test_rejects_non_positive_max_inputs(self, _, max_inputs):
         with self.assertRaisesRegex(ValueError, f"max_inputs must be at least 1, got {max_inputs}"):
             ballroom_scribe.cli.arguments.InputOutputCacheGroup(max_inputs=max_inputs)
+
+    @parameterized.expand(
+        [
+            param("known", process_cpu_count=12, expected=12),
+            param("unknown", process_cpu_count=None, expected=1),
+        ]
+    )
+    def test_whisper_cpu_threads_defaults_to_available_processors(self, _, process_cpu_count, expected):
+        self.mock_process_cpu_count.return_value = process_cpu_count
+
+        (parsed_args,) = ballroom_scribe.cli.arguments.parse_args(
+            (ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),),
+            [],
+            exit_on_error=False,
+        )
+
+        self.assertEqual(parsed_args["whisper_cpu_threads"], expected)
+
+    @parameterized.expand(
+        [
+            param(
+                "auto_resolves_to_cuda",
+                args=[],
+                resolved_device="cuda",
+                expected_requested="auto",
+                expected_model="large-v3",
+                expected_compute_type="float16",
+            ),
+            param(
+                "auto_resolves_to_cpu",
+                args=[],
+                resolved_device="cpu",
+                expected_requested="auto",
+                expected_model="turbo",
+                expected_compute_type="int8",
+            ),
+            param(
+                "explicit_device_still_validated",
+                args=["--whisper-device", "cuda"],
+                resolved_device="cuda",
+                expected_requested="cuda",
+                expected_model="large-v3",
+                expected_compute_type="float16",
+            ),
+            param(
+                "explicit_model_applies_to_every_device",
+                args=["--whisper-model", "medium"],
+                resolved_device="cpu",
+                expected_requested="auto",
+                expected_model="medium",
+                expected_compute_type="int8",
+            ),
+        ]
+    )
+    def test_whisper_defaults_follow_resolved_device(
+        self, _, args, resolved_device, expected_requested, expected_model, expected_compute_type
+    ):
+        self.mock_resolve_torch_device.return_value = resolved_device
+
+        (parsed_args,) = ballroom_scribe.cli.arguments.parse_args(
+            (ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),),
+            args,
+            exit_on_error=False,
+        )
+
+        self.mock_resolve_torch_device.assert_called_once_with(expected_requested)
+        self.assertEqual(parsed_args["whisper_device"], resolved_device)
+        self.assertEqual(parsed_args["whisper_model"], expected_model)
+        self.assertEqual(parsed_args["whisper_compute_type"], expected_compute_type)
+
+    def test_whisper_device_unavailable_is_an_argument_error(self):
+        self.mock_resolve_torch_device.side_effect = ValueError("The device is set to CUDA, but CUDA is not available.")
+
+        with self.assertRaisesRegex(
+            argparse.ArgumentError,
+            re.escape("argument --whisper-device: The device is set to CUDA, but CUDA is not available."),
+        ):
+            ballroom_scribe.cli.arguments.parse_args(
+                (ballroom_scribe.cli.arguments.SpeechTranscriptionGroup(),),
+                ["--whisper-device", "cuda"],
+                exit_on_error=False,
+            )
 
 
 if __name__ == "__main__":

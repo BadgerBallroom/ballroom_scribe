@@ -16,6 +16,7 @@ import tests.helpers.whisper_segment
 _CHANNEL = 1
 _CACHE_DIR = pathlib.Path("fake/path")
 _WHISPER_SAMPLE_RATE = 16_000
+_CPU_THREADS = 4
 
 
 def _make_audio_chunk(start_samples: int, num_samples: int, sample_rate: int = 10) -> ballroom_scribe.models.AudioChunk:
@@ -27,6 +28,20 @@ def _make_audio_chunk(start_samples: int, num_samples: int, sample_rate: int = 1
         classification=ballroom_scribe.models.AudioChunk.Classification.SPEECH,
         start_samples=start_samples,
     )
+
+
+def _make_transcriber(**overrides) -> ballroom_scribe.SpeechTranscriber:
+    """Helper to create a `SpeechTranscriber` with plain (non-mapping) arguments, overriding any of them."""
+    arguments = {
+        "whisper_device": "cpu",
+        "whisper_model": "large-v3",
+        "whisper_compute_type": "float16",
+        "whisper_cpu_threads": _CPU_THREADS,
+        "whisper_beam_size": MagicMock(),
+        "whisper_init_kwargs": {},
+    }
+    arguments.update(overrides)
+    return ballroom_scribe.SpeechTranscriber(**arguments)
 
 
 class TestFlattenSegmentsToWords(unittest.TestCase):
@@ -109,28 +124,112 @@ class TestFileOperations(unittest.TestCase):
 class TestInit(unittest.TestCase):
     """Unit tests for the `SpeechTranscriber.__init__` method."""
 
+    def setUp(self):
+        self.mock_validate_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
+        )
+
     def test_init_validates_whisper_init_kwargs(self):
-        whisper_beam_size = MagicMock()
         with self.assertRaisesRegex(TypeError, "unexpected keyword argument"):
-            ballroom_scribe.speech_transcriber.SpeechTranscriber(
-                whisper_init_kwargs={"model_size_or_path": "large-v3", "invalid keyword": "value does not matter"},
-                whisper_beam_size=whisper_beam_size,
-            )
-        with self.assertRaisesRegex(TypeError, "missing a required argument"):
-            ballroom_scribe.speech_transcriber.SpeechTranscriber(
-                whisper_init_kwargs={},
-                whisper_beam_size=whisper_beam_size,
-            )
+            _make_transcriber(whisper_init_kwargs={"invalid keyword": "value does not matter"})
+
+    @parameterized.expand(
+        [
+            param("model", whisper_init_kwargs={"model_size_or_path": "large-v3"}),
+            param("device", whisper_init_kwargs={"device": "cpu"}),
+            param("compute_type", whisper_init_kwargs={"compute_type": "int8"}),
+            param("cpu_threads", whisper_init_kwargs={"cpu_threads": 8}),
+        ]
+    )
+    def test_init_rejects_dedicated_keys_in_whisper_init_kwargs(self, _, whisper_init_kwargs):
+        with self.assertRaisesRegex(TypeError, "whisper_init_kwargs must not contain"):
+            _make_transcriber(whisper_init_kwargs=whisper_init_kwargs)
+        self.mock_validate_torch_device.assert_not_called()
+
+    @parameterized.expand(
+        [
+            param("auto", whisper_device="auto"),
+            param("indexed", whisper_device="cuda:1"),
+        ]
+    )
+    def test_init_rejects_unknown_device(self, _, whisper_device):
+        with self.assertRaisesRegex(
+            ValueError, rf"whisper_device must be one of \['cpu', 'cuda'\], got '{whisper_device}'"
+        ):
+            _make_transcriber(whisper_device=whisper_device)
+        self.mock_validate_torch_device.assert_not_called()
+
+    def test_init_rejects_negative_cpu_threads(self):
+        with self.assertRaisesRegex(ValueError, "whisper_cpu_threads must be 0 or positive, got -1"):
+            _make_transcriber(whisper_cpu_threads=-1)
+
+    @parameterized.expand(
+        [
+            param("cpu", whisper_device="cpu"),
+            param("cuda", whisper_device="cuda"),
+        ]
+    )
+    def test_init_validates_device(self, _, whisper_device):
+        transcriber = _make_transcriber(whisper_device=whisper_device)
+
+        self.mock_validate_torch_device.assert_called_once_with(whisper_device)
+        self.assertEqual(
+            transcriber._whisper_init_kwargs,
+            {
+                "model_size_or_path": "large-v3",
+                "device": whisper_device,
+                "compute_type": "float16",
+                "cpu_threads": _CPU_THREADS,
+            },
+        )
+
+    def test_init_propagates_device_validation_error(self):
+        self.mock_validate_torch_device.side_effect = ValueError(
+            "The device is set to CUDA, but CUDA is not available."
+        )
+
+        with self.assertRaisesRegex(ValueError, "CUDA is not available"):
+            _make_transcriber(whisper_device="cuda")
+
+    def test_init_passes_init_kwargs_through(self):
+        whisper_init_kwargs = {"local_files_only": True}
+
+        transcriber = _make_transcriber(
+            whisper_model="turbo",
+            whisper_compute_type="int8",
+            whisper_cpu_threads=0,
+            whisper_init_kwargs=whisper_init_kwargs,
+        )
+
+        self.assertEqual(
+            transcriber._whisper_init_kwargs,
+            {
+                "model_size_or_path": "turbo",
+                "device": "cpu",
+                "compute_type": "int8",
+                "cpu_threads": 0,
+                "local_files_only": True,
+            },
+        )
+        self.assertEqual(transcriber._model_tag, "turbo")
+        # The caller's dictionary is not mutated.
+        self.assertEqual(whisper_init_kwargs, {"local_files_only": True})
+
+    def test_init_sanitizes_model_tag(self):
+        transcriber = _make_transcriber(whisper_model="Systran/faster-whisper-large-v3")
+
+        self.assertEqual(transcriber._model_tag, "Systran_faster-whisper-large-v3")
 
 
 class TestTranscribe(unittest.TestCase):
     """Unit tests for the `SpeechTranscriber.transcribe` method."""
 
     def setUp(self):
-        self.transcriber = ballroom_scribe.SpeechTranscriber(
-            whisper_init_kwargs={"model_size_or_path": "large-v3"},
-            whisper_beam_size=MagicMock(),
+        self.mock_validate_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
         )
+
+        self.transcriber = _make_transcriber()
         self.mock_load_or_transcribe_chunk = self.enterContext(
             patch.object(self.transcriber, "_load_or_transcribe_chunk", autospec=True)
         )
@@ -212,14 +311,15 @@ class TestLoadOrTranscribeChunk(unittest.TestCase):
         self.mock_partial_cache_file = MagicMock(spec=pathlib.Path)
         self.mock_atomic_path.return_value.__enter__.return_value = self.mock_partial_cache_file
 
-        self.transcriber = ballroom_scribe.SpeechTranscriber(
-            whisper_init_kwargs={"model_size_or_path": "large-v3"},
-            whisper_beam_size=MagicMock(),
+        self.mock_validate_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
         )
+
+        self.transcriber = _make_transcriber()
         self.mock_call_whisper = self.enterContext(patch.object(self.transcriber, "_call_whisper", autospec=True))
 
         self.audio_chunk = _make_audio_chunk(start_samples=100, num_samples=40)
-        self.cache_file = _CACHE_DIR / f"0000000100-0000000140-{_CHANNEL}.csv"
+        self.cache_file = _CACHE_DIR / f"0000000100-0000000140-{_CHANNEL}-large-v3.csv"
 
     def test_cache_hit_reads_file(self):
         self.mock_path_exists.return_value = True
@@ -260,8 +360,10 @@ class TestCallWhisper(unittest.TestCase):
 
         self.mock_whisper_cls = self.enterContext(patch.object(faster_whisper, "WhisperModel", autospec=True))
         self.mock_whisper = self.mock_whisper_cls.return_value
-        # `feature_extractor` is set in `WhisperModel.__init__`, so the autospec of the class doesn't know about it.
+        # `feature_extractor` and `model` are set in `WhisperModel.__init__`, so the autospec of the class doesn't know
+        # about them.
         self.mock_whisper.feature_extractor = MagicMock(sampling_rate=_WHISPER_SAMPLE_RATE)
+        self.mock_whisper.model = MagicMock(device="cpu", compute_type="int8")
 
         self.mock_resample = self.enterContext(
             patch.object(ballroom_scribe.models.AudioChunk, "resample", autospec=True)
@@ -269,13 +371,12 @@ class TestCallWhisper(unittest.TestCase):
         self.mock_flatten = self.enterContext(
             patch.object(ballroom_scribe.speech_transcriber, "_flatten_segments_to_words", autospec=True)
         )
-
-        self.whisper_init_kwargs = {"model_size_or_path": "large-v3"}
-        self.whisper_beam_size = MagicMock()
-        self.transcriber = ballroom_scribe.SpeechTranscriber(
-            whisper_init_kwargs=self.whisper_init_kwargs,
-            whisper_beam_size=self.whisper_beam_size,
+        self.mock_validate_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
         )
+
+        self.whisper_beam_size = MagicMock()
+        self.transcriber = _make_transcriber(whisper_beam_size=self.whisper_beam_size)
 
     def test_lazy_loads_faster_whisper(self):
         self.mock_whisper.transcribe.return_value = ([MagicMock()], MagicMock())
@@ -283,7 +384,9 @@ class TestCallWhisper(unittest.TestCase):
         self.mock_whisper_cls.assert_not_called()
         self.transcriber._call_whisper(self.audio_chunk)
         self.transcriber._call_whisper(self.audio_chunk)
-        self.mock_whisper_cls.assert_called_once_with(**self.whisper_init_kwargs)
+        self.mock_whisper_cls.assert_called_once_with(
+            model_size_or_path="large-v3", device="cpu", compute_type="float16", cpu_threads=_CPU_THREADS
+        )
 
     def test_resamples_calls_whisper_and_flattens_segments(self):
         raw_segments = [MagicMock()]

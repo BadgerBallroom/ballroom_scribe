@@ -33,21 +33,21 @@ class TestInit(unittest.TestCase):
     """Unit tests for the `PannInferencer.__init__` method."""
 
     def setUp(self):
-        self.mock_validate_torch_device = self.enterContext(
-            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
+        self.mock_resolve_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
         )
 
-    def test_validates_torch_device(self):
-        ballroom_scribe.PannInferencer(device="fake_device")
-        self.mock_validate_torch_device.assert_called_once_with("fake_device")
+    def test_resolves_torch_device(self):
+        ballroom_scribe.PannInferencer(device="auto")
+        self.mock_resolve_torch_device.assert_called_once_with("auto")
 
 
 class TestInfer(unittest.TestCase):
     """Unit tests for the `PannInferencer.infer` method."""
 
     def setUp(self):
-        self.mock_validate_torch_device = self.enterContext(
-            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
+        self.mock_resolve_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
         )
         self.mock_infer_chunk = self.enterContext(patch.object(ballroom_scribe.PannInferencer, "infer_chunk"))
 
@@ -177,9 +177,10 @@ class TestInferChunk(unittest.TestCase):
     """Unit tests for the `PannInferencer.infer_chunk` method."""
 
     def setUp(self):
-        self.mock_validate_torch_device = self.enterContext(
-            patch.object(ballroom_scribe.utils, "validate_torch_device", autospec=True)
+        self.mock_resolve_torch_device = self.enterContext(
+            patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
         )
+        self.mock_resolve_torch_device.return_value = "cuda"
 
         self.mock_sed_cls = self.enterContext(patch.object(panns_inference, "SoundEventDetection"))
         self.mock_sed = self.mock_sed_cls.return_value
@@ -192,7 +193,8 @@ class TestInferChunk(unittest.TestCase):
         self.mock_partial_cache_file = MagicMock(spec=pathlib.Path)
         self.mock_atomic_path.return_value.__enter__.return_value = self.mock_partial_cache_file
 
-        self.inferencer = ballroom_scribe.PannInferencer(device="cuda")
+        # The resolved device, not the requested one, must reach `SoundEventDetection`.
+        self.inferencer = ballroom_scribe.PannInferencer(device="auto")
 
     def test_lazy_loads_sound_event_detection(self):
         self.mock_path_exists.return_value = False

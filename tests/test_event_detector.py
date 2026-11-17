@@ -12,7 +12,7 @@ import ballroom_scribe.models
 import ballroom_scribe.utils
 import tests.helpers.transcript_chunk
 
-_OLLAMA_MODEL = "fake-model"
+_OLLAMA_MODEL = "fake:model"
 _OLLAMA_OPTIONS = MagicMock(spec=ollama.Options)
 _CHANNEL = 1
 _CACHE_DIR = pathlib.Path("path/to/fake/dir")
@@ -426,7 +426,8 @@ class TestEventDetectorProcessChunk(unittest.TestCase):
             words=(),
         )
         # The LLM response cache is keyed by the audio channel too, so switching channels never reuses it.
-        self.path_stem = f"0000000100-0000000110-{_CHANNEL}"
+        # The cache name carries the chunk's sample range, its channel, and the sanitized Ollama model name.
+        self.path_stem = f"0000000100-0000000110-{_CHANNEL}-fake_model"
         self.event = ballroom_scribe.models.Event(
             level="Newcomer",
             style="Smooth",

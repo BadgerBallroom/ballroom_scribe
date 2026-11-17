@@ -289,6 +289,8 @@ class EventDetector:
         self._ollama_model = ollama_model
         self._ollama_options = ollama_options
         self._think = _model_supports_thinking(ollama_model)
+        # LLM responses are cached per model so that changing `--ollama-model` never reuses another model's answers.
+        self._model_tag = ballroom_scribe.utils.sanitize_filename_component(ollama_model)
 
     def detect(
         self,
@@ -325,7 +327,7 @@ class EventDetector:
         cache_dir: pathlib.Path,
     ) -> list[ballroom_scribe.models.Event]:
         """Checks for a cached LLM response and if there isn't one, calls the LLM."""
-        path_stem = chunk.get_filename_stem()
+        path_stem = f"{chunk.get_filename_stem()}-{self._model_tag}"
         response_output = cache_dir / (path_stem + ".json")
 
         if response_output.exists():

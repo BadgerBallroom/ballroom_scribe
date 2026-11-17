@@ -9,8 +9,7 @@ waveforms, run the pipeline, jump to detected events, adjust timestamps and meta
 
 The process is orchestrated by [timestamp_pipeline.py](ballroom_scribe/timestamp_pipeline.py) in distinct stages. When
 multiple videos are given, every input is validated up front and then every video passes through each stage before the
-next stage begins so that each model is loaded into VRAM only once per run (at the cost of holding the speech audio of
-all videos in RAM between the audio classification and speech transcription stages).
+next stage begins so that each model is loaded into memory (VRAM if using a GPU or RAM otherwise) only once per run.
 
 ```mermaid
 flowchart TD
@@ -85,14 +84,25 @@ interrupted run resumes where it left off. To make this safe, cache files are wr
 
 ## Requirements
 
-Although more hardware may be supported in the future, Scribe currently requires an NVIDIA GPU with CUDA support and a
-minimum of **8 GB of VRAM**. These models are used:
+Ballroom Scribe runs fastest on an NVIDIA GPU with CUDA support, but it also runs on machines without one:
 
-*   **PANNs Inference** uses ~6-8 GB of VRAM when classifying audio.
-    *   You can reduce this usage with the `--pann-chunk-minutes` flag.
-*   **Faster Whisper (`large-v3`)** requires ~3–4 GB of VRAM.
-*   **Qwen 2.5 7B (`qwen2.5:7b-instruct-q6_K`)** requires ~6-7 GB of VRAM.
-    *   You can use a different model via the `--ollama-model` flag.
+*   **With an NVIDIA GPU (recommended)**: a minimum of **8 GB of VRAM**. These models are used:
+    *   **PANNs Inference** uses ~6-8 GB of VRAM when classifying audio.
+        *   You can reduce this usage with the `--pann-chunk-minutes` flag.
+    *   **Faster Whisper (`large-v3`)** requires ~3–4 GB of VRAM. (Machines without an NVIDIA GPU use the faster
+        `turbo` model instead by default.)
+        *   You can use a different model via the `--whisper-model` flag.
+    *   **Qwen 2.5 7B (`qwen2.5:7b-instruct-q6_K`)** requires ~6-7 GB of VRAM.
+        *   You can use a different model via the `--ollama-model` flag.
+*   **Without an NVIDIA GPU**: every stage falls back to the CPU. Expect a run to take several times longer.
+    *   **PANNs Inference** runs the same model on the CPU.
+        *   You can reduce the RAM usage with the `--pann-chunk-minutes` flag.
+    *   **Faster Whisper** switches to the `turbo` model, which is several times faster than `large-v3` at a small cost
+        in accuracy, with `int8` weights and uses every logical processor available to it.
+        *   You can use a different model via the `--whisper-model` flag.
+        *   You can leave processors free for other work via the `--whisper-cpu-threads` flag.
+    *   **Qwen 2.5 7B (`qwen2.5:7b-instruct-q6_K`)** is still used by default.
+        *   Consider using a lighter model, such as `qwen2.5:3b-instruct`, via the `--ollama-model` flag.
 
 ## Setup
 
@@ -122,7 +132,16 @@ ollama pull qwen2.5:7b-instruct-q6_K
 
 ### Install Python Dependencies
 
-Install the required packages:
+On a machine with an NVIDIA GPU, install the required packages along with the CUDA libraries:
+
+```powershell
+pip install -r requirements-cuda.txt
+```
+
+If you later see the error message `Library cublas64_12.dll is not found`, then you typed `requirements.txt` instead of
+`requirements-cuda.txt`.
+
+On a machine without an NVIDIA GPU, install only the required packages:
 
 ```powershell
 pip install -r requirements.txt
@@ -180,6 +199,17 @@ The first time that you run the script, you may see the following message:
 
 This is normal; it appears when a model is downloaded from HuggingFace. After the first time, the models will be cached
 on your local system, and you should not see the message again.
+
+### Force Running on CPU
+
+To force the CPU on a machine that has an NVIDIA GPU, hide the GPU from CUDA before launching:
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = "-1"
+# Quit Ollama if it is running.
+ollama serve
+python find_timestamps.py -i C:\path\to\video.mp4 1
+```
 
 ## Reviewing and Editing Timestamps
 

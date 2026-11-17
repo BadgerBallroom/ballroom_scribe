@@ -5,7 +5,7 @@ import inspect
 import os
 import pathlib
 import sys
-from collections.abc import Generator, Iterable
+from collections.abc import Generator, Iterable, Mapping
 from typing import Any
 
 if sys.platform == "win32":
@@ -49,6 +49,9 @@ import ballroom_scribe.models
 import ballroom_scribe.utils
 
 _CTRANSLATE2_EXTRA_KWARGS = frozenset({"max_queued_batches", "flash_attention", "tensor_parallel"})
+_WHISPER_DEVICES = frozenset({"cuda", "cpu"})
+# Keyword arguments of `WhisperModel.__init__` that `SpeechTranscriber` sets from its own parameters.
+_DEDICATED_INIT_KWARGS = frozenset({"model_size_or_path", "device", "compute_type", "cpu_threads"})
 
 
 def _flatten_segments_to_words(
@@ -98,29 +101,71 @@ class SpeechTranscriber:
 
     def __init__(
         self,
-        whisper_init_kwargs: dict[str, Any],
+        whisper_device: str,
+        whisper_model: str,
+        whisper_compute_type: str,
+        whisper_cpu_threads: int,
         whisper_beam_size: int,
+        whisper_init_kwargs: Mapping[str, Any],
     ):
         """Initializes the instance.
 
         Args:
-            whisper_init_kwargs: Keyword arguments to pass to the Faster Whisper model initializer.
-            whisper_beam_size: The beam size to use for the Faster Whisper model.
+            whisper_device: `"cuda"` or `"cpu"`. (`SpeechTranscriptionGroup` resolves `auto` to one of these with the
+                same rule `PannInferencer` uses.)
+            whisper_model: The Faster Whisper model: a size such as `"large-v3"` or `"turbo"`, a HuggingFace
+                repository, or a local directory.
+            whisper_compute_type: The CTranslate2 compute type, e.g. `"float16"` or `"int8"`.
+            whisper_cpu_threads: The number of threads Faster Whisper uses when it runs on the CPU, or `0` for Faster
+                Whisper's own default (`OMP_NUM_THREADS`, else 4). CTranslate2 ignores it on CUDA.
+            whisper_beam_size: The beam size to use for decoding.
+            whisper_init_kwargs: Additional keyword arguments passed unchanged to `WhisperModel.__init__`, such as
+                `device_index` or `local_files_only`. Must not contain `model_size_or_path`, `device`, `compute_type`,
+                or `cpu_threads`.
+
+        Raises:
+            TypeError: If `whisper_init_kwargs` contains a dedicated key or does not match `WhisperModel.__init__`.
+            ValueError: If `whisper_device` is not `cuda` or `cpu`, if it is `cuda` while CUDA is not available, or if
+                `whisper_cpu_threads` is negative.
         """
+        if dedicated := _DEDICATED_INIT_KWARGS & whisper_init_kwargs.keys():
+            raise TypeError(
+                f"whisper_init_kwargs must not contain {', '.join(sorted(dedicated))}; use the dedicated parameters."
+            )
+        if whisper_device not in _WHISPER_DEVICES:
+            raise ValueError(f"whisper_device must be one of {sorted(_WHISPER_DEVICES)}, got {whisper_device!r}.")
+        ballroom_scribe.utils.validate_torch_device(whisper_device)
+        if whisper_cpu_threads < 0:
+            raise ValueError(f"whisper_cpu_threads must be 0 or positive, got {whisper_cpu_threads}.")
+
+        self._whisper_init_kwargs = {
+            "model_size_or_path": whisper_model,
+            "device": whisper_device,
+            "compute_type": whisper_compute_type,
+            "cpu_threads": whisper_cpu_threads,
+            **whisper_init_kwargs,
+        }
         # Validate the arguments to `WhisperModel.__init__` now because it is lazily called.
         whisper_model_signature = inspect.signature(faster_whisper.WhisperModel)
-        whisper_model_signature.bind(**whisper_init_kwargs)
+        whisper_model_signature.bind(**self._whisper_init_kwargs)
         valid_keys = (whisper_model_signature.parameters.keys() - {"model_kwargs"}) | _CTRANSLATE2_EXTRA_KWARGS
         if unexpected := whisper_init_kwargs.keys() - valid_keys:
             raise TypeError(f"WhisperModel will get unexpected keyword argument(s): {', '.join(sorted(unexpected))}")
 
         self._whisper_beam_size = whisper_beam_size
-        self._whisper_init_kwargs = whisper_init_kwargs
+        # Transcripts are cached per model so that switching models (including the automatic choice between CUDA and
+        # the CPU) never reuses another model's output.
+        self._model_tag = ballroom_scribe.utils.sanitize_filename_component(whisper_model)
 
     @functools.cached_property
     def _whisper_model(self) -> faster_whisper.WhisperModel:
         """Initializes the Faster Whisper model."""
-        return faster_whisper.WhisperModel(**self._whisper_init_kwargs)
+        model = faster_whisper.WhisperModel(**self._whisper_init_kwargs)
+        print(
+            f"Loaded Faster Whisper model {self._whisper_init_kwargs['model_size_or_path']} on {model.model.device}"
+            f" using compute type {model.model.compute_type}."
+        )
+        return model
 
     @property
     def _whisper_sample_rate(self) -> int:
@@ -176,7 +221,7 @@ class SpeechTranscriber:
         Returns:
             The transcribed words.
         """
-        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}.csv"
+        cache_file = cache_dir / f"{audio_chunk.get_filename_stem()}-{self._model_tag}.csv"
         if cache_file.exists():
             return _read_words_from_file(cache_file)
 

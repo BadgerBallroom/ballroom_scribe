@@ -59,8 +59,12 @@ def _make_pipeline() -> ballroom_scribe.TimestampPipeline:
             max_dip_speech_seconds=2.0,
         ),
         speech_transcription_args=ballroom_scribe.cli.arguments.SpeechTranscriptionArgs(
-            whisper_init_kwargs={"model_size_or_path": "large-v3"},
+            whisper_device="cpu",
+            whisper_model="large-v3",
+            whisper_compute_type="float16",
+            whisper_cpu_threads=4,
             whisper_beam_size=5,
+            whisper_init_kwargs={},
         ),
         language_processing_args=ballroom_scribe.cli.arguments.LanguageProcessingArgs(
             ollama_model="qwen2.5:7b",
@@ -205,8 +209,12 @@ class TestPipeline(unittest.TestCase):
             max_dip_speech_seconds=2.0,
         )
         self.mock_transcriber_cls.assert_called_once_with(
-            whisper_init_kwargs={"model_size_or_path": "large-v3"},
+            whisper_device="cpu",
+            whisper_model="large-v3",
+            whisper_compute_type="float16",
+            whisper_cpu_threads=4,
             whisper_beam_size=5,
+            whisper_init_kwargs={},
         )
         self.mock_detector_cls.assert_called_once_with(
             ollama_model="qwen2.5:7b",

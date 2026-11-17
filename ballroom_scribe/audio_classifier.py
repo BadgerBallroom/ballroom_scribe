@@ -56,7 +56,8 @@ class AudioClassifier:
         """Initializes the instance.
 
         Args:
-            device: The PyTorch device on which to run PANN inference.
+            device: The PyTorch device on which to run PANN inference, or `"auto"` to use CUDA when it is available
+                and the CPU otherwise.
             thresholds: A mapping with classifications as keys and confidence thresholds as values. For each key, the
                 PANN must have a confidence that is greater than the threshold for the audio chunk to receive that
                 classification. Every possible classification must be included.

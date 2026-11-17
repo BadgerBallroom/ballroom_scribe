@@ -24,11 +24,13 @@ class _Video:
             - `Audio-Channel-*.wav`: the extracted audio from the input video
             - `Waveform-Channel-*.npz`: min/max waveform peaks cached by the GUI editor
             - `<start>-<end>-<channel>.npy`: audio classification inferences
-            - `<start>-<end>-<channel>.csv`: the transcribed words of each speech chunk
-            - `<start>-<end>-<channel>.json`: the detected events from the transcript
-            - `<start>-<end>-<channel>.md`: LLM thinking output
+            - `<start>-<end>-<channel>-<whisper model>.csv`: the transcribed words of each speech chunk
+            - `<start>-<end>-<channel>-<ollama model>.json`: the detected events from the transcript
+            - `<start>-<end>-<channel>-<ollama model>.md`: LLM thinking output
             `<start>` and `<end>` are sample indices into the extracted audio and `<channel>` is `input_channel`, so
-            results for different channels of the same video never collide.
+            results for different channels of the same video never collide. `<whisper model>` and `<ollama model>` are
+            the model names with characters that are unsafe in file names replaced by `_`, so switching models never
+            reuses another model's output.
             Except for the `*.md` files, each file is first written to a temporary `*.partial.*` file and renamed once
             complete, so an existing file is never partially written.
     """

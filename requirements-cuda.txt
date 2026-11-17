@@ -1,0 +1,11 @@
+# Dependencies for machines with an NVIDIA GPU: everything in requirements.txt, with PyTorch swapped for its CUDA build.
+-r requirements.txt
+
+# PyTorch with CUDA 13.2 support. `torch==2.14.0` in requirements.txt also matches this local version (PEP 440 ignores
+# local version labels when the specifier has none), so pip resolves both pins to the CUDA build.
+--extra-index-url https://download.pytorch.org/whl/cu132
+torch==2.14.0+cu132
+
+# Explicit CUDA 12 libraries required by CTranslate2 inside Faster Whisper
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cudnn-cu12==9.26.0.51

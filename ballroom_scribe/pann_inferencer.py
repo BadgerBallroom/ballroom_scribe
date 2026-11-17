@@ -32,10 +32,10 @@ class PannInferencer:
         """Initializes the instance.
 
         Args:
-            device: The PyTorch device on which to run PANN inference.
+            device: The PyTorch device on which to run PANN inference, or `"auto"` to use CUDA when it is available
+                and the CPU otherwise.
         """
-        ballroom_scribe.utils.validate_torch_device(device)
-        self._device = device
+        self._device = ballroom_scribe.utils.resolve_torch_device(device)
 
     @functools.cached_property
     def _sound_event_detection(self) -> panns_inference.SoundEventDetection:

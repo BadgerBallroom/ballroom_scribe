@@ -24,8 +24,11 @@ class AudioClassificationGroup(Group[AudioClassificationArgs]):
         group = parser.add_argument_group("Audio Classification", "Detecting speech and music in the audio")
         group.add_argument(
             "--pann-device",
-            default="cuda",
-            help="The device on which to run audio classification (default: %(default)s)",
+            default="auto",
+            help=(
+                "The PyTorch device on which to run audio classification; 'auto' uses CUDA when it is available and"
+                " the CPU otherwise (default: %(default)s)"
+            ),
         )
         group.add_argument(
             "--pann-chunk-minutes",

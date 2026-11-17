@@ -7,6 +7,8 @@ from .find_closest_matching import find_closest_matching
 from .format_duration import format_duration
 from .free_vram import free_vram
 from .parse_duration import parse_duration
+from .resolve_torch_device import resolve_torch_device
+from .sanitize_filename_component import sanitize_filename_component
 from .validate_input_channel import validate_input_channel
 from .validate_torch_device import validate_torch_device
 
@@ -20,6 +22,8 @@ __all__ = [
     "format_duration",
     "free_vram",
     "parse_duration",
+    "resolve_torch_device",
+    "sanitize_filename_component",
     "validate_input_channel",
     "validate_torch_device",
 ]

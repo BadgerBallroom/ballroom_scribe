@@ -288,15 +288,20 @@ ruff format
 
 ## Documentation
 
-Keep `README.md` up to date whenever changes affect user-facing behavior or
-project architecture, including:
+Keep `README.md` concise. It should give users a high-level understanding of the
+architecture and how to set up and use the pipeline, without becoming verbose or
+diving into implementation details (such as internal classes, algorithms, helper
+mechanics, cache/state internals, or edge-case behavior — leave those to
+docstrings and `AGENTS.md`, and leave exhaustive flag details to `--help`).
 
-*   **Architecture and pipeline stages**: Updates to `TimestampPipeline` stages,
-    data flow, component responsibilities, or intermediate cache file formats
-    (including the Mermaid flowchart and numbered stage breakdown).
-*   **Models, hardware, and dependencies**: Changes to ML/LLM models, VRAM
-    requirements, system tools (`ffmpeg`, `ollama`), or Python package Setup
-    steps.
-*   **CLI usage and flags**: New, renamed, or removed CLI arguments, entry-point
-    scripts (`find_timestamps.py`, `edit_timestamps.py`,
-    `smoke_test_editor.py`), or interactive tools (`tune_pann_thresholds.py`).
+Update `README.md` when changes affect high-level architecture or core
+user-facing usage, including:
+
+*   **Architecture overview**: High-level changes to `TimestampPipeline` stages
+    or overall data flow (the Mermaid flowchart and stage summary).
+*   **Setup, models, and hardware**: Changes to system tools (`ffmpeg`,
+    `ollama`), Python dependencies, default ML/LLM models, or hardware/VRAM
+    requirements.
+*   **Usage and entry points**: Changes to core workflows or documented CLI
+    options for `find_timestamps.py` and companion scripts
+    (`edit_timestamps.py`, `smoke_test_editor.py`, `tune_pann_thresholds.py`).
