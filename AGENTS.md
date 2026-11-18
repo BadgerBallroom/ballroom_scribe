@@ -44,7 +44,7 @@
     never import PyTorch, PANNs, Faster Whisper, or Ollama. When a lightweight
     module needs a heavy third-party package only on certain code paths, bind it
     at module top with `name = lazy_loader.load("name")` (e.g.,
-    `panns_inference` in `extract_audio.py`) rather than using a function-level
+    `panns_inference` in `pann_inferencer.py`) rather than using a function-level
     import. Set `EAGER_IMPORT=1` when debugging or verifying stub exports.
 *   **Test helper imports**: Import test helpers as `import
     tests.helpers.<module>` and reference symbols via

@@ -5,16 +5,15 @@ import pathlib
 from collections.abc import Generator
 
 import numpy as np
-import panns_inference
 import soundfile
 
+import ballroom_scribe
 import ballroom_scribe.models
 
 
 class AudioLoader:
     """Loads audio from a file."""
 
-    SAMPLE_RATE = panns_inference.config.sample_rate
     DTYPE = "float32"
 
     def __init__(self, chunk_minutes: float, chunk_overlap_seconds: float):
@@ -30,13 +29,14 @@ class AudioLoader:
         if chunk_overlap_seconds < 0.0:
             raise ValueError(f"chunk_overlap_seconds must be non-negative, but got {chunk_overlap_seconds}.")
 
-        self._overlap_samples = math.floor(chunk_overlap_seconds * self.SAMPLE_RATE)
+        sample_rate = ballroom_scribe.PannInferencer.SAMPLE_RATE
+        self._overlap_samples = math.floor(chunk_overlap_seconds * sample_rate)
 
         # The core is the part of the chunk that doesn't overlap with the chunk before or after.
         # It also happens to be the number of samples that are read from the file at a time; that's because with each
         # read, the first `_overlap_samples` samples of the core have already been read but the first `_overlap_samples`
         # samples of the next core need to be read.
-        self._core_samples = math.floor(chunk_minutes * 60.0 * self.SAMPLE_RATE)
+        self._core_samples = math.floor(chunk_minutes * 60.0 * sample_rate)
 
         # This is the actual number of samples in each chunk except the first and last.
         self._chunk_actual_shape = (self._overlap_samples * 2 + self._core_samples,)
@@ -54,10 +54,11 @@ class AudioLoader:
                 extracted. It is recorded on every yielded chunk so that cache files derived from the chunks are
                 specific to this channel.
         """
+        expected_sample_rate = ballroom_scribe.PannInferencer.SAMPLE_RATE
         with soundfile.SoundFile(input_audio, mode="r") as f:
-            if f.samplerate != self.SAMPLE_RATE:
+            if f.samplerate != expected_sample_rate:
                 raise ValueError(
-                    f"Audio file {input_audio} has sample rate {f.samplerate}, which is not {self.SAMPLE_RATE}."
+                    f"Audio file {input_audio} has sample rate {f.samplerate}, which is not {expected_sample_rate}."
                 )
 
             if f.frames == 0:
@@ -109,7 +110,7 @@ class AudioLoader:
         return ballroom_scribe.models.AudioChunk(
             start_samples=start_samples,
             data=data,
-            sample_rate=self.SAMPLE_RATE,
+            sample_rate=ballroom_scribe.PannInferencer.SAMPLE_RATE,
             channel=channel,
             # The classification is always unknown here. Classifying is `AudioClassifier`'s job.
             classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,

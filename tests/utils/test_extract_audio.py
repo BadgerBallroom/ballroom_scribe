@@ -5,8 +5,7 @@ import threading
 import unittest
 from unittest.mock import ANY, MagicMock, patch
 
-import panns_inference
-
+import ballroom_scribe
 import ballroom_scribe.utils
 
 _INPUT_VIDEO = pathlib.Path("raw_data/clip.mp4")
@@ -46,7 +45,7 @@ class TestExtractAudio(unittest.TestCase):
             "-af",
             "pan=mono|c0=c1,highpass=f=100",
             "-ar",
-            str(panns_inference.config.sample_rate),
+            str(ballroom_scribe.PannInferencer.SAMPLE_RATE),
             str(self.mock_partial_audio),
         ]
 

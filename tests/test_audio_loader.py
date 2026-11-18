@@ -49,7 +49,7 @@ class TestAudioLoader(unittest.TestCase):
         self.mock_soundfile = self.mock_soundfile_cls.return_value
         self.mock_soundfile.__enter__.return_value = self.mock_soundfile
 
-        self.enterContext(patch.object(ballroom_scribe.AudioLoader, "SAMPLE_RATE", new=_SAMPLE_RATE))
+        self.enterContext(patch.object(ballroom_scribe.PannInferencer, "SAMPLE_RATE", new=_SAMPLE_RATE))
         self.mock_soundfile.samplerate = _SAMPLE_RATE
         self.mock_soundfile.channels = 1
 

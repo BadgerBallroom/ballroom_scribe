@@ -5,19 +5,14 @@ import pathlib
 import subprocess
 import threading
 
-import lazy_loader
-
+import ballroom_scribe
 import ballroom_scribe.utils
-
-# Loaded lazily so lightweight callers (such as the GUI on a cache hit) do not import PyTorch or librosa.
-panns_inference = lazy_loader.load("panns_inference")
 
 _CANCEL_POLL_SECONDS = 0.1
 
 
 def _ffmpeg_command(input_video: pathlib.Path, input_channel: int, output_audio: pathlib.Path) -> list[str]:
     """Builds the `ffmpeg` command extracting `input_channel` of `input_video` to a 32,000 Hz mono WAV."""
-    assert panns_inference is not None
     return [
         "ffmpeg",
         "-y",
@@ -32,7 +27,7 @@ def _ffmpeg_command(input_video: pathlib.Path, input_channel: int, output_audio:
         # Extract only the specified channel without downmixing, and apply a 100 Hz high-pass filter.
         f"pan=mono|c0=c{input_channel},highpass=f=100",
         "-ar",
-        str(panns_inference.config.sample_rate),  # Downsample to 32kHz
+        str(ballroom_scribe.PannInferencer.SAMPLE_RATE),  # Downsample to 32kHz
         str(output_audio),
     ]
 

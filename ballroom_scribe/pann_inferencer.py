@@ -4,15 +4,31 @@ import collections
 import functools
 import pathlib
 from collections.abc import Iterable
+from typing import TYPE_CHECKING
 
+import lazy_loader
 import numpy as np
-import panns_inference
 
 import ballroom_scribe.models
 import ballroom_scribe.utils
 
+if TYPE_CHECKING:
+    import panns_inference
+else:
+    # Loaded lazily so `panns_inference/config.py` does not run (and shell out to `wget` for `class_labels_indices.csv`)
+    # before `_ensure_panns_data` has downloaded the required files.
+    panns_inference = lazy_loader.load("panns_inference")
+
+_PANNS_DATA_DIR_NAME = "panns_data"
+_LABELS_CSV_FILENAME = "class_labels_indices.csv"
+_LABELS_CSV_URL = "https://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv"
+_CHECKPOINT_FILENAME = "Cnn14_DecisionLevelMax.pth"
+_CHECKPOINT_URL = "https://zenodo.org/record/3987831/files/Cnn14_DecisionLevelMax_mAP%3D0.385.pth?download=1"
+# `panns_inference.SoundEventDetection.__init__` shells out to `wget` if the checkpoint is smaller than `3e8` bytes.
+_MIN_CHECKPOINT_BYTES = 300_000_000
+
 # The PANN is trained on the AudioSet Ontology: https://research.google.com/audioset/ontology/index.html
-# Its labels are defined here: http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv
+# Its labels are defined here: https://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv
 # You can find links to example sounds here: https://github.com/audioset/ontology/blob/master/ontology.json
 _CLASSIFICATION_LABEL_INDICES = collections.OrderedDict[ballroom_scribe.models.AudioChunk.Classification, list[int]](
     (
@@ -23,9 +39,23 @@ _CLASSIFICATION_LABEL_INDICES = collections.OrderedDict[ballroom_scribe.models.A
 )
 
 
+def _ensure_panns_data() -> pathlib.Path:
+    """Downloads `panns_inference`'s label CSV and model checkpoint into `~/panns_data` if missing.
+
+    Returns:
+        The path to the downloaded `Cnn14_DecisionLevelMax.pth` model checkpoint.
+    """
+    panns_data_dir = pathlib.Path.home() / _PANNS_DATA_DIR_NAME
+    ballroom_scribe.utils.download_if_missing(_LABELS_CSV_URL, panns_data_dir / _LABELS_CSV_FILENAME)
+    checkpoint_path = panns_data_dir / _CHECKPOINT_FILENAME
+    ballroom_scribe.utils.download_if_missing(_CHECKPOINT_URL, checkpoint_path, min_bytes=_MIN_CHECKPOINT_BYTES)
+    return checkpoint_path
+
+
 class PannInferencer:
     """Runs the PANN sound event detection model on audio chunks and caches framewise probabilities."""
 
+    SAMPLE_RATE = 32_000
     CLASSIFICATIONS = _CLASSIFICATION_LABEL_INDICES.keys()
 
     def __init__(self, device: str):
@@ -40,11 +70,12 @@ class PannInferencer:
     @functools.cached_property
     def _sound_event_detection(self) -> panns_inference.SoundEventDetection:
         """The sound event detection model."""
+        checkpoint_path = _ensure_panns_data()
         # Work around a bug in `panns_inference.SoundEventDetection`: its `__init__` checks `device == "cuda"`
         # literally (silently falling back to `"cpu"` for indexed devices such as `"cuda:1"`) and wraps the model in
         # `torch.nn.DataParallel` (which runs single-chunk batches on `cuda:0`). Initialize on `"cpu"` first and move
         # the model onto `self._device` ourselves.
-        sed = panns_inference.SoundEventDetection(device="cpu")
+        sed = panns_inference.SoundEventDetection(checkpoint_path=str(checkpoint_path), device="cpu")
         sed.device = self._device
         sed.model.to(self._device)
         return sed

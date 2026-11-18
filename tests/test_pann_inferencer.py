@@ -3,15 +3,17 @@ import unittest
 from unittest.mock import ANY, MagicMock, call, patch
 
 import numpy as np
-import panns_inference
 from parameterized import param, parameterized
 
 import ballroom_scribe
 import ballroom_scribe.models
+import ballroom_scribe.pann_inferencer
 import ballroom_scribe.utils
 
 _CHANNEL = 1
 _CACHE_DIR = pathlib.Path("fake/path")
+_FAKE_HOME = pathlib.Path("fake/home")
+_FAKE_CHECKPOINT = _FAKE_HOME / "panns_data" / "Cnn14_DecisionLevelMax.pth"
 
 
 def _make_audio_chunk(
@@ -27,6 +29,36 @@ def _make_audio_chunk(
         classification=ballroom_scribe.models.AudioChunk.Classification.UNKNOWN,
         start_samples=start_samples,
     )
+
+
+class TestEnsurePannsData(unittest.TestCase):
+    """Unit tests for the `_ensure_panns_data` helper."""
+
+    def setUp(self):
+        self.mock_home = self.enterContext(patch.object(pathlib.Path, "home", autospec=True))
+        self.mock_home.return_value = _FAKE_HOME
+        self.mock_download_if_missing = self.enterContext(
+            patch.object(ballroom_scribe.utils, "download_if_missing", autospec=True)
+        )
+
+    def test_downloads_labels_csv_and_checkpoint_under_home_panns_data(self):
+        checkpoint_path = ballroom_scribe.pann_inferencer._ensure_panns_data()
+
+        self.assertEqual(checkpoint_path, _FAKE_CHECKPOINT)
+        self.assertEqual(
+            self.mock_download_if_missing.call_args_list,
+            [
+                call(
+                    ballroom_scribe.pann_inferencer._LABELS_CSV_URL,
+                    _FAKE_HOME / "panns_data" / "class_labels_indices.csv",
+                ),
+                call(
+                    ballroom_scribe.pann_inferencer._CHECKPOINT_URL,
+                    _FAKE_CHECKPOINT,
+                    min_bytes=ballroom_scribe.pann_inferencer._MIN_CHECKPOINT_BYTES,
+                ),
+            ],
+        )
 
 
 class TestInit(unittest.TestCase):
@@ -49,20 +81,39 @@ class TestSoundEventDetection(unittest.TestCase):
         self.mock_resolve_torch_device = self.enterContext(
             patch.object(ballroom_scribe.utils, "resolve_torch_device", autospec=True)
         )
-        self.mock_sed_cls = self.enterContext(patch.object(panns_inference, "SoundEventDetection", autospec=True))
+        self.mock_ensure_panns_data = self.enterContext(
+            patch.object(ballroom_scribe.pann_inferencer, "_ensure_panns_data", autospec=True)
+        )
+        self.mock_ensure_panns_data.return_value = _FAKE_CHECKPOINT
+
+        # Supply `new=MagicMock()` explicitly so `unittest.mock` does not inspect attributes on the `_LazyModule`.
+        self.mock_panns_inference = self.enterContext(
+            patch.object(ballroom_scribe.pann_inferencer, "panns_inference", new=MagicMock())
+        )
+        self.mock_sed_cls = self.mock_panns_inference.SoundEventDetection
         self.mock_sed = self.mock_sed_cls.return_value
         self.mock_sed.device = "cpu"
         self.mock_sed.model = MagicMock()
 
-    def test_uses_resolved_device(self):
+    def test_ensures_panns_data_before_initializing_and_moves_to_resolved_device(self):
+        call_order = MagicMock()
+        call_order.attach_mock(self.mock_ensure_panns_data, "ensure_panns_data")
+        call_order.attach_mock(self.mock_sed_cls, "sound_event_detection")
+
         self.mock_resolve_torch_device.return_value = "cuda:1"
         inferencer = ballroom_scribe.PannInferencer(device="cuda:1")
 
         sed = inferencer._sound_event_detection
 
-        self.mock_sed_cls.assert_called_once()
+        self.assertEqual(
+            call_order.mock_calls,
+            [
+                call.ensure_panns_data(),
+                call.sound_event_detection(checkpoint_path=str(_FAKE_CHECKPOINT), device="cpu"),
+                call.sound_event_detection().model.to("cuda:1"),
+            ],
+        )
         self.assertEqual(sed.device, "cuda:1")
-        self.mock_sed.model.to.assert_called_once_with("cuda:1")
 
 
 class TestInfer(unittest.TestCase):
@@ -205,7 +256,15 @@ class TestInferChunk(unittest.TestCase):
         )
         self.mock_resolve_torch_device.return_value = "cuda"
 
-        self.mock_sed_cls = self.enterContext(patch.object(panns_inference, "SoundEventDetection"))
+        self.mock_ensure_panns_data = self.enterContext(
+            patch.object(ballroom_scribe.pann_inferencer, "_ensure_panns_data", autospec=True)
+        )
+        self.mock_ensure_panns_data.return_value = _FAKE_CHECKPOINT
+
+        self.mock_panns_inference = self.enterContext(
+            patch.object(ballroom_scribe.pann_inferencer, "panns_inference", new=MagicMock())
+        )
+        self.mock_sed_cls = self.mock_panns_inference.SoundEventDetection
         self.mock_sed = self.mock_sed_cls.return_value
 
         self.mock_path_exists = self.enterContext(patch.object(pathlib.Path, "exists"))
@@ -224,10 +283,12 @@ class TestInferChunk(unittest.TestCase):
         audio_chunk = _make_audio_chunk(start_samples=100, num_samples=40, sample_rate=10)
         self.mock_sed.inference.return_value = np.zeros((1, 2, 527), dtype=np.float32)
 
+        self.mock_ensure_panns_data.assert_not_called()
         self.mock_sed_cls.assert_not_called()
         self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
         self.inferencer.infer_chunk(audio_chunk=audio_chunk, cache_dir=_CACHE_DIR)
-        self.mock_sed_cls.assert_called_once_with(device="cpu")
+        self.mock_ensure_panns_data.assert_called_once_with()
+        self.mock_sed_cls.assert_called_once_with(checkpoint_path=str(_FAKE_CHECKPOINT), device="cpu")
         self.assertEqual(self.inferencer._sound_event_detection.device, "cuda")
         self.mock_sed.model.to.assert_called_once_with("cuda")
 
@@ -241,6 +302,7 @@ class TestInferChunk(unittest.TestCase):
 
         self.mock_path_exists.assert_called_once_with()
         self.mock_np_load.assert_called_once_with(_CACHE_DIR / f"0000000100-0000000140-{_CHANNEL}.npy")
+        self.mock_ensure_panns_data.assert_not_called()
         self.mock_sed.inference.assert_not_called()
         self.mock_np_save.assert_not_called()
         self.mock_atomic_path.assert_not_called()

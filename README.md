@@ -147,21 +147,6 @@ On a machine without an NVIDIA GPU, install only the required packages:
 pip install -r requirements.txt
 ```
 
-### Workaround for PANNs Inference
-
-The PANNs Inference library, which is used to discern between dance music and the emcee speaking, will try to download
-[a CSV of class labels](https://github.com/qiuqiangkong/panns_inference/blob/f673f604ec6f4805a61c5b3be087e24776ec5fda/panns_inference/config.py#L11-L13)
-and
-[a PyTorch model checkpoint](https://github.com/qiuqiangkong/panns_inference/blob/f673f604ec6f4805a61c5b3be087e24776ec5fda/panns_inference/inference.py#L34-L37).
-Unfortunately, it does it with `wget`, which most Windows machines do not have. You can download it with:
-
-```powershell
-$dir = "$HOME\panns_data"
-if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir }
-Invoke-WebRequest -Uri "http://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv" -OutFile "$dir\class_labels_indices.csv"
-Invoke-WebRequest -Uri "https://zenodo.org/record/3987831/files/Cnn14_DecisionLevelMax_mAP%3D0.385.pth?download=1" -OutFile "$dir\Cnn14_DecisionLevelMax.pth"
-```
-
 ## Usage
 
 Invoke the main script, [find_timestamps.py](find_timestamps.py), from a PowerShell terminal. The basic usage is:
@@ -192,13 +177,19 @@ You can find more options with:
 python find_timestamps.py --help
 ```
 
-The first time that you run the script, you may see the following message:
+The first time that you run the script, you will see:
+
+> `Downloading C:\Users\<user>\panns_data\class_labels_indices.csv from https://storage.googleapis.com/us_audioset/youtube_corpus/v1/csv/class_labels_indices.csv...`
+>
+> `Downloading C:\Users\<user>\panns_data\Cnn14_DecisionLevelMax.pth from https://zenodo.org/record/3987831/files/Cnn14_DecisionLevelMax_mAP%3D0.385.pth?download=1...`
+
+You may also see the following message:
 
 > Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits
 > and faster downloads.
 
-This is normal; it appears when a model is downloaded from HuggingFace. After the first time, the models will be cached
-on your local system, and you should not see the message again.
+These messages are normal; they appear when the PANNs Inference and HuggingFace models are downloaded. After the first
+time, the models will be cached on your local system, and you should not see them again.
 
 ### Force Running on CPU
 
