@@ -6,7 +6,7 @@ import os
 import pathlib
 import re
 import sys
-from collections.abc import Generator, Iterable, Mapping
+from collections.abc import Callable, Generator, Iterable, Mapping
 from typing import Any
 
 if sys.platform == "win32":
@@ -95,6 +95,20 @@ def _read_words_from_file(input_path: pathlib.Path) -> Iterable[ballroom_scribe.
     with open(input_path, "r", encoding="utf-8") as f:
         reader = dataclass_csv.DataclassReader(f, ballroom_scribe.models.Word)
         yield from reader
+
+
+def _transcript_of(
+    span: ballroom_scribe.models.Chunk,
+    words: tuple[ballroom_scribe.models.Word, ...],
+) -> ballroom_scribe.models.TranscriptChunk:
+    """Returns a transcript chunk that holds `words` and covers the same audio as `span`."""
+    return ballroom_scribe.models.TranscriptChunk(
+        start_samples=span.start_samples,
+        sample_rate=span.sample_rate,
+        duration_samples=span.duration_samples,
+        channel=span.channel,
+        words=words,
+    )
 
 
 class SpeechTranscriber:
@@ -189,6 +203,7 @@ class SpeechTranscriber:
         self,
         music_valley: ballroom_scribe.models.MusicValley,
         cache_dir: pathlib.Path,
+        on_speech_transcribed: Callable[[ballroom_scribe.models.TranscriptChunk], None] | None = None,
     ) -> ballroom_scribe.models.TranscriptChunk:
         """Transcribes the speech in a music valley into word-level timestamps.
 
@@ -198,23 +213,23 @@ class SpeechTranscriber:
         Args:
             music_valley: The music valley whose `speech_chunks` will be transcribed.
             cache_dir: The directory in which transcriptions will be cached.
+            on_speech_transcribed: If given, called once per speech chunk, in chronological order, with a transcript
+                chunk that spans only that speech chunk and contains only its words (possibly none). Each call is made
+                as soon as the speech chunk has been transcribed or read from the cache, before the next speech chunk
+                is started, so a caller can show the speech of a long music valley while the rest of it is still being
+                transcribed.
 
         Returns:
             A transcript chunk spanning the whole music valley, containing the words of all of its speech chunks in
             chronological order. Word timestamps are in seconds since the beginning of the original audio file.
         """
-        words = tuple(
-            word
-            for audio_chunk in music_valley.speech_chunks
-            for word in self._load_or_transcribe_chunk(audio_chunk=audio_chunk, cache_dir=cache_dir)
-        )
-        return ballroom_scribe.models.TranscriptChunk(
-            start_samples=music_valley.start_samples,
-            sample_rate=music_valley.sample_rate,
-            duration_samples=music_valley.duration_samples,
-            channel=music_valley.channel,
-            words=words,
-        )
+        words: list[ballroom_scribe.models.Word] = []
+        for audio_chunk in music_valley.speech_chunks:
+            speech_words = tuple(self._load_or_transcribe_chunk(audio_chunk=audio_chunk, cache_dir=cache_dir))
+            words.extend(speech_words)
+            if on_speech_transcribed is not None:
+                on_speech_transcribed(_transcript_of(audio_chunk, speech_words))
+        return _transcript_of(music_valley, tuple(words))
 
     def _load_or_transcribe_chunk(
         self,

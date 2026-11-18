@@ -297,8 +297,9 @@ docstrings and `AGENTS.md`, and leave exhaustive flag details to `--help`).
 Update `README.md` when changes affect high-level architecture or core
 user-facing usage, including:
 
-*   **Architecture overview**: High-level changes to `TimestampPipeline` stages
-    or overall data flow (the Mermaid flowchart and stage summary).
+*   **Architecture overview**: High-level changes to `TranscriptionPipeline` or
+    `TimestampPipeline` stages or overall data flow (the Mermaid flowchart and
+    stage summary).
 *   **Setup, models, and hardware**: Changes to system tools (`ffmpeg`,
     `ollama`), Python dependencies, default ML/LLM models, or hardware/VRAM
     requirements.

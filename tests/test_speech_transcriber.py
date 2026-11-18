@@ -298,6 +298,100 @@ class TestTranscribe(unittest.TestCase):
             ),
         )
 
+    def test_reports_each_speech_chunk_before_starting_the_next(self):
+        first_chunk = _make_audio_chunk(start_samples=100, num_samples=40)
+        second_chunk = _make_audio_chunk(start_samples=200, num_samples=50)
+        music_valley = ballroom_scribe.models.MusicValley(
+            start_samples=80,
+            sample_rate=10,
+            duration_samples=300,
+            channel=_CHANNEL,
+            speech_chunks=(first_chunk, second_chunk),
+        )
+        first_words = (
+            ballroom_scribe.models.Word(word="hello", start=10.0, end=10.5),
+            ballroom_scribe.models.Word(word="world", start=10.5, end=11.0),
+        )
+        second_words = (ballroom_scribe.models.Word(word="dance", start=20.0, end=20.5),)
+        self.mock_load_or_transcribe_chunk.side_effect = [iter(first_words), iter(second_words)]
+
+        mock_on_speech_transcribed = MagicMock()
+        manager = MagicMock()
+        manager.attach_mock(self.mock_load_or_transcribe_chunk, "load_or_transcribe_chunk")
+        manager.attach_mock(mock_on_speech_transcribed, "on_speech_transcribed")
+
+        result = self.transcriber.transcribe(
+            music_valley=music_valley,
+            cache_dir=_CACHE_DIR,
+            on_speech_transcribed=mock_on_speech_transcribed,
+        )
+
+        # Each speech chunk is reported with its own span and words before the next one is loaded or transcribed.
+        self.assertEqual(
+            manager.mock_calls,
+            [
+                call.load_or_transcribe_chunk(audio_chunk=first_chunk, cache_dir=_CACHE_DIR),
+                call.on_speech_transcribed(
+                    ballroom_scribe.models.TranscriptChunk(
+                        start_samples=100,
+                        sample_rate=10,
+                        duration_samples=40,
+                        channel=_CHANNEL,
+                        words=first_words,
+                    )
+                ),
+                call.load_or_transcribe_chunk(audio_chunk=second_chunk, cache_dir=_CACHE_DIR),
+                call.on_speech_transcribed(
+                    ballroom_scribe.models.TranscriptChunk(
+                        start_samples=200,
+                        sample_rate=10,
+                        duration_samples=50,
+                        channel=_CHANNEL,
+                        words=second_words,
+                    )
+                ),
+            ],
+        )
+        # The music valley's transcript chunk is the same as without a callback.
+        self.assertEqual(
+            result,
+            ballroom_scribe.models.TranscriptChunk(
+                start_samples=80,
+                sample_rate=10,
+                duration_samples=300,
+                channel=_CHANNEL,
+                words=first_words + second_words,
+            ),
+        )
+
+    def test_reports_a_speech_chunk_without_words(self):
+        speech_chunk = _make_audio_chunk(start_samples=100, num_samples=40)
+        music_valley = ballroom_scribe.models.MusicValley(
+            start_samples=80,
+            sample_rate=10,
+            duration_samples=300,
+            channel=_CHANNEL,
+            speech_chunks=(speech_chunk,),
+        )
+        self.mock_load_or_transcribe_chunk.return_value = iter(())
+        mock_on_speech_transcribed = MagicMock()
+
+        self.transcriber.transcribe(
+            music_valley=music_valley,
+            cache_dir=_CACHE_DIR,
+            on_speech_transcribed=mock_on_speech_transcribed,
+        )
+
+        mock_on_speech_transcribed.assert_called_once_with(
+            ballroom_scribe.models.TranscriptChunk(
+                start_samples=100,
+                sample_rate=10,
+                duration_samples=40,
+                channel=_CHANNEL,
+                words=(),
+            )
+        )
+
     def test_valley_without_speech_yields_empty_transcript_chunk(self):
         music_valley = ballroom_scribe.models.MusicValley(
             start_samples=80,
@@ -306,10 +400,16 @@ class TestTranscribe(unittest.TestCase):
             channel=_CHANNEL,
             speech_chunks=(),
         )
+        mock_on_speech_transcribed = MagicMock()
 
-        result = self.transcriber.transcribe(music_valley=music_valley, cache_dir=_CACHE_DIR)
+        result = self.transcriber.transcribe(
+            music_valley=music_valley,
+            cache_dir=_CACHE_DIR,
+            on_speech_transcribed=mock_on_speech_transcribed,
+        )
 
         self.mock_load_or_transcribe_chunk.assert_not_called()
+        mock_on_speech_transcribed.assert_not_called()
         self.assertEqual(
             result,
             ballroom_scribe.models.TranscriptChunk(

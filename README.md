@@ -7,9 +7,11 @@ waveforms, run the pipeline, jump to detected events, adjust timestamps and meta
 
 ## Architecture
 
-The process is orchestrated by [timestamp_pipeline.py](ballroom_scribe/timestamp_pipeline.py) in distinct stages. When
-multiple videos are given, every input is validated up front and then every video passes through each stage before the
-next stage begins so that each model is loaded into memory (VRAM if using a GPU or RAM otherwise) only once per run.
+The process is orchestrated by [timestamp_pipeline.py](ballroom_scribe/timestamp_pipeline.py) in distinct stages. It
+runs stages 1–4 through [transcription_pipeline.py](ballroom_scribe/transcription_pipeline.py) and then stages 5–6
+itself. When multiple videos are given, every input is validated up front and then every video passes through each
+stage before the next stage begins so that each model is loaded into memory (VRAM if using a GPU or RAM otherwise) only
+once per run.
 
 ```mermaid
 flowchart TD

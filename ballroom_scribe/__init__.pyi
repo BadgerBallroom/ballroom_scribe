@@ -6,6 +6,7 @@ from .music_valley_detector import MusicValleyDetector
 from .pann_inferencer import PannInferencer
 from .speech_transcriber import SpeechTranscriber
 from .timestamp_pipeline import TimestampPipeline
+from .transcription_pipeline import TranscriptionPipeline
 
 __all__ = [
     "AudioClassifier",
@@ -16,4 +17,5 @@ __all__ = [
     "PannInferencer",
     "SpeechTranscriber",
     "TimestampPipeline",
+    "TranscriptionPipeline",
 ]
