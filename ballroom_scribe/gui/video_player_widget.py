@@ -1,16 +1,25 @@
-"""Video player widget wrapping `QMediaPlayer`, `QAudioOutput`, and `QVideoWidget`."""
+"""Video player widget wrapping `QMediaPlayer`, `QAudioOutput`, and `CaptionedVideoWidget`."""
 
 import logging
 import pathlib
+import time
+from collections.abc import Sequence
 from typing import override
 
-from PySide6 import QtCore, QtGui, QtMultimedia, QtMultimediaWidgets, QtWidgets
+from PySide6 import QtCore, QtGui, QtMultimedia, QtWidgets
 
+import ballroom_scribe.gui
+import ballroom_scribe.gui.utils
+import ballroom_scribe.models
 import ballroom_scribe.utils
 
 _LOGGER = logging.getLogger(__name__)
 _POLL_INTERVAL_MS = 16
 _FIRST_FRAME_TIMEOUT_MS = 3000
+# While playing, a frame that carries a changed on-picture caption is rendered well within this time.
+_OVERLAY_FRAME_SECONDS = 0.25
+_CAPTIONS_TOOLTIP = "Show or hide closed captions (C)"
+_NO_CAPTIONS_TOOLTIP = "Closed captions appear once the speech of this video has been transcribed"
 _READY_STATUSES = frozenset(
     {
         QtMultimedia.QMediaPlayer.MediaStatus.LoadedMedia,
@@ -48,7 +57,13 @@ class VideoPlayerWidget(QtWidgets.QWidget):
 
     `position_changed` reports every playhead move, whereas `playback_advanced` reports only the stretches of media
     time covered by live playback (never seeks, steps, or slider scrubs), so listeners can react to the playhead
-    crossing a timestamp.
+    crossing a timestamp. For a moment after playback starts, the backend can report a position that playback
+    cannot have reached, such as the target of an earlier seek; neither signal reports it (see `is_stale_position`).
+
+    The closed caption at the playhead (see `set_captions`) is shown below the picture when the pane has room there
+    and on the picture otherwise, and the `CC` button hides it. Qt draws an on-picture caption with the frames that
+    it renders, so when that caption changes while the player is paused, the widget seeks to the position it is
+    already at, which renders the frame again.
 
     Loading, media metadata, the first rendered frame, playback errors, and status transitions are logged via
     `logging` to help diagnose decoding or rendering problems.
@@ -70,11 +85,18 @@ class VideoPlayerWidget(QtWidgets.QWidget):
         self._audio_output = QtMultimedia.QAudioOutput(self)
         self._player.setAudioOutput(self._audio_output)
 
-        self._video_widget = QtMultimediaWidgets.QVideoWidget(self)
-        self._video_widget.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-        self._video_widget.setMinimumHeight(220)
-        self._video_widget.installEventFilter(self)
-        self._player.setVideoOutput(self._video_widget)
+        self._captions: tuple[ballroom_scribe.models.TranscriptChunk, ...] = ()
+        self._caption_text = ""
+        # Set while a seek is about to be issued, whose frame will carry any change of the on-picture caption.
+        self._frame_is_on_its_way = False
+        self._overlay_changed_at = -float("inf")
+
+        self._video_view = ballroom_scribe.gui.CaptionedVideoWidget(self)
+        self._video_view.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+        self._video_view.setMinimumHeight(220)
+        self._video_view.installEventFilter(self)
+        self._video_view.overlay_changed.connect(self._on_overlay_changed)
+        self._player.setVideoSink(self._video_view.video_sink())
 
         self._play_button = QtWidgets.QPushButton(self)
         self._play_button.setEnabled(False)
@@ -94,16 +116,29 @@ class VideoPlayerWidget(QtWidgets.QWidget):
         mono_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         self._time_label.setFont(mono_font)
 
+        # Disabled until the active video has captions; `MainWindow` also offers the action in its View menu.
+        self._captions_action = QtGui.QAction("Closed Captions", self)
+        self._captions_action.setIconText("CC")
+        self._captions_action.setCheckable(True)
+        self._captions_action.setChecked(True)
+        self._captions_action.setEnabled(False)
+        self._captions_action.setToolTip(_NO_CAPTIONS_TOOLTIP)
+        self._captions_action.toggled.connect(self._on_captions_toggled)
+        self._captions_button = QtWidgets.QToolButton(self)
+        self._captions_button.setObjectName("captionsButton")
+        self._captions_button.setDefaultAction(self._captions_action)
+
         controls_layout = QtWidgets.QHBoxLayout()
         controls_layout.setContentsMargins(6, 4, 6, 4)
         controls_layout.addWidget(self._play_button)
         controls_layout.addWidget(self._slider, stretch=1)
         controls_layout.addWidget(self._time_label)
+        controls_layout.addWidget(self._captions_button)
 
         root_layout = QtWidgets.QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
-        root_layout.addWidget(self._video_widget, stretch=1)
+        root_layout.addWidget(self._video_view, stretch=1)
         root_layout.addLayout(controls_layout)
 
         self._poll_timer = QtCore.QTimer(self)
@@ -123,6 +158,11 @@ class VideoPlayerWidget(QtWidgets.QWidget):
         self._resume_playback_after_load = False
         self._cached_position_ms: int = 0
         self._duration_ms: int = 0
+        # Where and when playback started or the playhead was last moved, for telling an out-of-date position report
+        # from playback progress, and the last report that was ignored as out of date.
+        self._progress_start_ms: int = 0
+        self._progress_started_at = -float("inf")
+        self._ignored_position_ms: int | None = None
 
         self._player.playbackStateChanged.connect(self._on_playback_state_changed)
         self._player.positionChanged.connect(self._on_player_position_changed)
@@ -145,9 +185,51 @@ class VideoPlayerWidget(QtWidgets.QWidget):
         """Returns the path of the loaded video, if any."""
         return self._source_path
 
+    @property
+    def captions_action(self) -> QtGui.QAction:
+        """Returns the checkable action that shows or hides closed captions, which the `CC` button triggers."""
+        return self._captions_action
+
+    @property
+    def captions(self) -> tuple[ballroom_scribe.models.TranscriptChunk, ...]:
+        """Returns the closed captions of the loaded video (see `set_captions`)."""
+        return self._captions
+
+    @property
+    def caption_text(self) -> str:
+        """Returns the text of the caption at the playhead, or an empty string if nothing is being said there."""
+        return self._caption_text
+
+    @property
+    def caption_placement(self) -> ballroom_scribe.gui.CaptionedVideoWidget.Placement:
+        """Returns where captions are shown: below the picture, on the picture, or not at all."""
+        return self._video_view.placement
+
     def video_sink(self) -> QtMultimedia.QVideoSink:
         """Returns the `QVideoSink` that receives decoded frames, e.g. to observe rendering from a smoke test."""
-        return self._video_widget.videoSink()
+        return self._video_view.video_sink()
+
+    def set_captions(self, captions: Sequence[ballroom_scribe.models.TranscriptChunk]) -> None:
+        """Sets the closed captions of the loaded video and shows the one at the playhead.
+
+        Call it again whenever the transcript grows: the picture changes only if the caption at the playhead did.
+        Loading another video with `set_source` removes the captions.
+
+        Args:
+            captions: The captions in chronological order, as returned by `group_words_into_captions`. Each one is
+                shown while the playhead is inside its time span. Without captions, the `CC` button is disabled.
+        """
+        self._captions = tuple(captions)
+        has_captions = bool(self._captions)
+        self._captions_action.setEnabled(has_captions)
+        self._captions_action.setToolTip(_CAPTIONS_TOOLTIP if has_captions else _NO_CAPTIONS_TOOLTIP)
+        self._video_view.set_captions_visible(has_captions and self._captions_action.isChecked())
+        self._show_caption_at(self.position_seconds())
+
+    def toggle_captions(self) -> None:
+        """Shows or hides closed captions, as clicking the `CC` button does; does nothing without captions."""
+        if self._captions_action.isEnabled():
+            self._captions_action.toggle()
 
     def set_source(
         self,
@@ -161,6 +243,8 @@ class VideoPlayerWidget(QtWidgets.QWidget):
             preserve_playing and self._player.playbackState() == QtMultimedia.QMediaPlayer.PlaybackState.PlayingState
         )
         self._poll_timer.stop()
+        # A new video must never show the previous video's captions.
+        self.set_captions(())
 
         if video_path is None:
             _LOGGER.debug("Clearing video source")
@@ -211,6 +295,7 @@ class VideoPlayerWidget(QtWidgets.QWidget):
         if self._duration_ms > 0:
             target_ms = min(target_ms, self._duration_ms)
         self._cached_position_ms = target_ms
+        self._mark_progress_start()
 
         status = self._player.mediaStatus()
         if status in (
@@ -218,8 +303,11 @@ class VideoPlayerWidget(QtWidgets.QWidget):
             QtMultimedia.QMediaPlayer.MediaStatus.NoMedia,
         ):
             self._pending_seek_ms = target_ms
+            self._show_caption_at(target_ms / 1000.0)
         else:
             self._pending_seek_ms = None
+            # The caption is set before the seek so that the frame decoded for the seek already carries it.
+            self._show_caption_at(target_ms / 1000.0, frame_is_on_its_way=True)
             self._player.setPosition(target_ms)
 
         if not self._slider_scrubbing:
@@ -253,7 +341,7 @@ class VideoPlayerWidget(QtWidgets.QWidget):
 
     @override
     def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
-        if watched is self._video_widget and event.type() == QtCore.QEvent.Type.KeyPress:
+        if watched is self._video_view and event.type() == QtCore.QEvent.Type.KeyPress:
             assert isinstance(event, QtGui.QKeyEvent)
             if self._handle_arrow_step(event):
                 return True
@@ -282,15 +370,65 @@ class VideoPlayerWidget(QtWidgets.QWidget):
             self._is_playing = playing
             self.playing_changed.emit(playing)
 
+    def _mark_progress_start(self) -> None:
+        """Notes where and when playback starts or the playhead is moved, which `_apply_position_update` relies on."""
+        self._progress_start_ms = self._cached_position_ms
+        self._progress_started_at = time.monotonic()
+
     def _on_playback_state_changed(self, state: QtMultimedia.QMediaPlayer.PlaybackState) -> None:
         _LOGGER.debug("Playback state: %s", state.name)
         self._update_play_icon()
         playing = state == QtMultimedia.QMediaPlayer.PlaybackState.PlayingState
         if playing:
+            self._mark_progress_start()
             self._poll_timer.start()
         else:
             self._poll_timer.stop()
         self._set_playing(playing)
+        if (
+            state == QtMultimedia.QMediaPlayer.PlaybackState.PausedState
+            and time.monotonic() - self._overlay_changed_at < _OVERLAY_FRAME_SECONDS
+        ):
+            # The on-picture caption changed just before playback paused, perhaps after the last frame was rendered.
+            self._render_frame_again()
+
+    def _on_captions_toggled(self, checked: bool) -> None:
+        self._video_view.set_captions_visible(checked and bool(self._captions))
+
+    def _show_caption_at(self, seconds: float, *, frame_is_on_its_way: bool = False) -> None:
+        """Shows the caption whose time span contains `seconds`.
+
+        Args:
+            seconds: The playhead position.
+            frame_is_on_its_way: Whether the caller is about to seek. The frame decoded for that seek carries a
+                changed on-picture caption, so the current frame does not need to be rendered again.
+        """
+        caption = ballroom_scribe.gui.utils.find_caption(self._captions, seconds)
+        self._caption_text = caption.get_text() if caption is not None else ""
+        self._frame_is_on_its_way = frame_is_on_its_way
+        try:
+            self._video_view.set_caption(self._caption_text)
+        finally:
+            self._frame_is_on_its_way = False
+
+    def _on_overlay_changed(self) -> None:
+        """Gets a changed on-picture caption onto the screen, which takes a newly rendered frame."""
+        self._overlay_changed_at = time.monotonic()
+        if not self._frame_is_on_its_way:
+            self._render_frame_again()
+
+    def _render_frame_again(self) -> None:
+        """Seeks to the current position while paused, which makes Qt render the frame there again.
+
+        While playing, the next frame is moments away. While media is loading or a seek is pending, the frame that
+        follows carries the caption. While stopped, Qt renders no frames at all.
+        """
+        if (
+            self._has_source
+            and self._pending_seek_ms is None
+            and self._player.playbackState() == QtMultimedia.QMediaPlayer.PlaybackState.PausedState
+        ):
+            self._player.setPosition(self._cached_position_ms)
 
     def _on_player_position_changed(self, position_ms: int) -> None:
         if self._pending_seek_ms is None:
@@ -384,14 +522,33 @@ class VideoPlayerWidget(QtWidgets.QWidget):
 
         Seeks store their target in `_cached_position_ms` before the backend reports it, so while playing, the span
         from the previously cached position to `position_ms` covers only media time that actually played.
+
+        A report that playback cannot have reached is ignored for a moment after playback starts or the playhead is
+        moved (see `is_stale_position`). Otherwise the playhead would jump there and back, and listeners to
+        `playback_advanced` would take the jump for playback across everything in between.
         """
         previous_ms = self._cached_position_ms
         if position_ms == previous_ms:
             return
+        if self._is_playing and ballroom_scribe.gui.utils.is_stale_position(
+            self._progress_start_ms / 1000.0,
+            position_ms / 1000.0,
+            time.monotonic() - self._progress_started_at,
+        ):
+            if position_ms != self._ignored_position_ms:
+                self._ignored_position_ms = position_ms
+                _LOGGER.debug(
+                    "Ignoring the out-of-date position %.3f s, reported while playing from %.3f s",
+                    position_ms / 1000.0,
+                    self._progress_start_ms / 1000.0,
+                )
+            return
+        self._ignored_position_ms = None
         self._cached_position_ms = position_ms
         if not self._slider_scrubbing:
             self._slider.setValue(position_ms)
         self._update_time_label()
+        self._show_caption_at(position_ms / 1000.0)
         self.position_changed.emit(position_ms / 1000.0)
         if self._is_playing and position_ms > previous_ms:
             self.playback_advanced.emit(previous_ms / 1000.0, position_ms / 1000.0)
@@ -401,7 +558,9 @@ class VideoPlayerWidget(QtWidgets.QWidget):
 
     def _on_slider_moved(self, value_ms: int) -> None:
         self._cached_position_ms = value_ms
+        self._mark_progress_start()
         self._pending_seek_ms = None
+        self._show_caption_at(value_ms / 1000.0, frame_is_on_its_way=True)
         self._player.setPosition(value_ms)
         self._update_time_label()
         self.slider_scrubbed.emit()

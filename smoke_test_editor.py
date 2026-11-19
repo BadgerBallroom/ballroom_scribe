@@ -4,11 +4,16 @@ Generates two short synthetic clips with `ffmpeg`, drives `ballroom_scribe.gui.M
 workflows under Qt's `offscreen` platform (or in a real window with `--windowed`), and saves a screenshot. Unlike the
 unit tests, this runs real `ffmpeg`/`ffprobe` subprocesses and Qt Multimedia decoding, so it is the quickest way to
 confirm the editor works end to end on a new machine.
+
+The pipeline's models are never run: the editor's transcription worker is replaced by a stand-in script that prints
+the transcript chunks the test leaves for it, so the editor's handling of the worker process is still exercised on
+every video that the test opens.
 """
 
 import argparse
 import contextlib
 import dataclasses
+import json
 import math
 import os
 import pathlib
@@ -20,13 +25,14 @@ import time
 from collections.abc import Callable, Iterator
 
 import numpy as np
-from PySide6 import QtCore, QtGui, QtMultimedia, QtTest, QtWidgets
+from PySide6 import QtCore, QtGui, QtMultimedia, QtMultimediaWidgets, QtTest, QtWidgets
 
 import ballroom_scribe
 import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
 import ballroom_scribe.gui.models
 import ballroom_scribe.gui.utils
+import ballroom_scribe.models
 
 _ML_MODULES = ("torch", "torchaudio", "faster_whisper", "ollama", "librosa")
 _CLIP_SECONDS = 10.0
@@ -63,6 +69,62 @@ _PLAYBACK_TIMEOUT_SECONDS = 5.0
 # Pixels sampled this far inside a cell's right edge are clear of both the current-cell frame and left-aligned text.
 _CELL_INTERIOR_INSET = 6
 _COLOR_TOLERANCE = 8
+_WORKER_SCRIPT_NAME = "smoke_transcription_worker.py"
+_TRANSCRIPT_DIR_NAME = "transcripts"
+_TRANSCRIPTION_TIMEOUT_SECONDS = 30.0
+_SPEECH_CHUNK_DELAY_SECONDS = 0.6
+_SPEECH_SAMPLE_RATE = 32_000
+_SPEECH_WORD_SPACING_SECONDS = 0.18
+_SPEECH_WORD_SECONDS = 0.12
+# The start time and the words of each sentence of the transcript that the stand-in worker delivers. Every sentence
+# is also one caption, because more than a second passes before the next one starts. The words are close enough
+# together to merge into one marker per sentence when the whole clip is on screen. At the closest zoom most of them
+# stand alone; how many depends on the size of the font.
+_SPEECH_SENTENCES = (
+    (1.0, ("Welcome", "back,", "everybody.")),
+    (2.5, ("Tonight's", "first", "event.")),
+    (5.0, ("Couples,", "please", "begin.")),
+    (8.0, ("Wonderful,", "thanks", "again!")),
+)
+_SENTENCE_ZOOM_PIXELS_PER_SECOND = 100.0
+_SPEECH_LABEL_BRIGHTNESS = 170
+# More than the height of the strip that holds two lines of caption below the video picture.
+_CAPTION_STRIP_ROOM = 110
+_WORKER_SCRIPT = '''"""Stand-in for the editor's transcription worker, written by `smoke_test_editor.py`.
+
+Prints the transcript chunks that the smoke test left for the video and channel it is given, so that the editor's
+handling of the worker process can be tested without the pipeline's models.
+"""
+
+import json
+import pathlib
+import sys
+import time
+
+arguments = sys.argv[1:]
+video = pathlib.Path(arguments[arguments.index("-i") + 1])
+channel = arguments[arguments.index("-i") + 2]
+directory = pathlib.Path(__file__).with_name("transcripts")
+with open(directory / "runs.log", "a", encoding="utf-8") as log:
+    log.write(f"{video.name} {channel}\\n")
+plan_path = directory / f"{video.name}.{channel}.json"
+if not plan_path.exists():
+    sys.exit(0)
+plan = json.loads(plan_path.read_text(encoding="utf-8"))
+print("Checking input videos...", file=sys.stderr, flush=True)
+for line in plan["lines"]:
+    sys.stdout.write(line + "\\n")
+    sys.stdout.flush()
+    time.sleep(plan["delay_seconds"])
+heartbeat = directory / "heartbeat.txt"
+deadline = time.monotonic() + plan["linger_seconds"]
+while time.monotonic() < deadline:
+    heartbeat.write_text(str(time.monotonic()), encoding="utf-8")
+    time.sleep(0.05)
+if plan["error"]:
+    print(plan["error"], file=sys.stderr, flush=True)
+sys.exit(plan["exit_status"])
+'''
 _ALT = QtCore.Qt.KeyboardModifier.AltModifier
 _CTRL = QtCore.Qt.KeyboardModifier.ControlModifier
 _NO_MODIFIER = QtCore.Qt.KeyboardModifier.NoModifier
@@ -87,6 +149,7 @@ class _Fixture:
 class _DeliveredFrame:
     seconds: float
     size: QtCore.QSize
+    subtitle: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -111,7 +174,13 @@ class _FrameRecorder(QtCore.QObject):
     @QtCore.Slot(QtMultimedia.QVideoFrame)
     def record(self, frame: QtMultimedia.QVideoFrame) -> None:
         if frame.isValid():
-            self.frames.append(_DeliveredFrame(seconds=frame.startTime() / 1_000_000, size=frame.size()))
+            self.frames.append(
+                _DeliveredFrame(
+                    seconds=frame.startTime() / 1_000_000,
+                    size=frame.size(),
+                    subtitle=frame.subtitleText(),
+                )
+            )
 
 
 def _expect(condition: bool, message: str) -> None:
@@ -1064,7 +1133,10 @@ def _image_pixels(image: QtGui.QImage) -> np.ndarray:
 
 
 def _check_playback_follows_rows(fixture: _Fixture) -> None:
-    """Playback highlights the row whose `Inpoint` it crosses, unless editing, multi-selecting, or holding `Alt`."""
+    """Playback highlights the row whose `Inpoint` it crosses, unless editing, multi-selecting, or holding `Alt`.
+
+    A position that the media player reports although playback cannot have reached it is ignored.
+    """
     window = fixture.window
     waveform = window.waveform
     view = window.table_view
@@ -1182,6 +1254,33 @@ def _check_playback_follows_rows(fixture: _Fixture) -> None:
     _expect(view.selected_rows() == (0,), f"Playing with Alt held selected {view.selected_rows()}")
     play_until(player.position_seconds() + 0.2, "after releasing Alt")
     _expect(view.selected_rows() == (0,), f"Releasing Alt belatedly selected {view.selected_rows()}")
+
+    # 6. A position that playback cannot have reached, reported just after playback starts, moves neither the playhead
+    # nor the selection. Qt's FFmpeg backend on Windows reports the target of an earlier seek for a moment after
+    # seeks in quick succession, which is imitated here by reporting 7.5 s through the media player's own signal.
+    media_player = player.findChild(QtMultimedia.QMediaPlayer)
+    _expect(media_player is not None, "Could not find the media player inside the video player widget")
+    assert media_player is not None
+    position_before = player.position_seconds()
+    player.seek(1.0)
+    fixture.app.processEvents()
+    player.toggle_play_pause()
+    _wait_until(
+        fixture.app, lambda: player.is_playing, _PLAYBACK_TIMEOUT_SECONDS, "playback to start before a stale report"
+    )
+    media_player.positionChanged.emit(7500)
+    fixture.app.processEvents()
+    _expect(
+        player.position_seconds() < _FIRST_ROW_SECONDS and view.selected_rows() == (0,),
+        f"A position of 7.5 s reported just after playback started at 1 s moved the playhead to"
+        f" {player.position_seconds():.3f} s with selected_rows={view.selected_rows()}",
+    )
+    player.pause()
+    _wait_until(
+        fixture.app, lambda: not player.is_playing, _PLAYBACK_TIMEOUT_SECONDS, "playback to pause after a stale report"
+    )
+    player.seek(position_before)
+    fixture.app.processEvents()
 
 
 def _check_focused_waveform_paints_interior(fixture: _Fixture) -> None:
@@ -2414,11 +2513,21 @@ def _check_comment_column(fixture: _Fixture) -> None:
     content_splitter = root_splitter.widget(0)
     assert isinstance(content_splitter, QtWidgets.QSplitter)
     original_sizes = content_splitter.sizes()
+    original_window_size = window.size()
 
     def set_table_width(width: int) -> None:
-        """Gives the table pane `width` pixels of the video/table splitter, letting the column layout settle."""
-        content_splitter.setSizes([content_splitter.width() - width, width])
-        _settle(fixture.app, 0.1)
+        """Gives the table pane `width` pixels of the video/table splitter, letting the column layout settle.
+
+        The window is made wider if the video pane cannot give up that much.
+        """
+        for _ in range(2):
+            content_splitter.setSizes([content_splitter.width() - width, width])
+            _settle(fixture.app, 0.1)
+            missing_width = width - content_splitter.sizes()[1]
+            if missing_width <= 0:
+                break
+            window.resize(window.width() + missing_width, window.height())
+            _settle(fixture.app, 0.1)
 
     def comment_editor() -> QtWidgets.QPlainTextEdit:
         editor = _open_cell_editor(fixture)
@@ -2488,9 +2597,17 @@ def _check_comment_column(fixture: _Fixture) -> None:
         )
 
         # 4. A wide table shows the first line of the comment, with an ellipsis for the rest, in a text column that
-        # starts at least 160 px wide; double-clicking it opens the same overlay with the whole comment.
-        set_table_width(1000)
-        _expect(model.comment_display == display.TEXT, f"Comment display is {model.comment_display} in a 1000 px table")
+        # starts at least 160 px wide; double-clicking it opens the same overlay with the whole comment. How wide the
+        # table has to be depends on the size of the font, which sets the widths of the columns before `Level`.
+        table_width = 1000
+        set_table_width(table_width)
+        while model.comment_display != display.TEXT and table_width < 2000:
+            table_width += 250
+            set_table_width(table_width)
+        _expect(
+            model.comment_display == display.TEXT,
+            f"Comment display is {model.comment_display} in a table {content_splitter.sizes()[1]} px wide",
+        )
         _expect(
             header.sectionSize(int(col.COMMENT)) >= 160, f"Text column is {header.sectionSize(int(col.COMMENT))} px"
         )
@@ -2517,6 +2634,8 @@ def _check_comment_column(fixture: _Fixture) -> None:
             model.undo_stack.undo()
             _expect(model.record_at(0).comment == comment_text, "Undo did not restore the cleared comment")
     finally:
+        window.resize(original_window_size)
+        _settle(fixture.app, 0.1)
         content_splitter.setSizes(original_sizes)
         _settle(fixture.app, 0.1)
 
@@ -3001,6 +3120,554 @@ def _check_save_round_trip(fixture: _Fixture) -> None:
     _expect(reloaded == list(window.table_model.records), "Saved CSV does not round-trip through EventRecorder")
 
 
+def _transcription_command(work_dir: pathlib.Path) -> tuple[str, ...]:
+    """Returns the command that runs the stand-in transcription worker."""
+    return (sys.executable, "-u", str(work_dir / _WORKER_SCRIPT_NAME))
+
+
+def _write_transcription_worker(work_dir: pathlib.Path) -> None:
+    """Writes the stand-in transcription worker and the directory in which the test leaves transcripts for it."""
+    transcript_dir = work_dir / _TRANSCRIPT_DIR_NAME
+    if transcript_dir.exists():
+        shutil.rmtree(transcript_dir)
+    transcript_dir.mkdir(parents=True)
+    (work_dir / _WORKER_SCRIPT_NAME).write_text(_WORKER_SCRIPT, encoding="utf-8")
+
+
+def _transcript_plan(work_dir: pathlib.Path, clip: pathlib.Path, channel: int) -> pathlib.Path:
+    return work_dir / _TRANSCRIPT_DIR_NAME / f"{clip.name}.{channel}.json"
+
+
+def _leave_transcript(
+    work_dir: pathlib.Path,
+    clip: pathlib.Path,
+    channel: int,
+    chunks: list[ballroom_scribe.models.TranscriptChunk],
+    *,
+    delay_seconds: float = 0.0,
+    linger_seconds: float = 0.0,
+    exit_status: int = 0,
+    error: str = "",
+) -> None:
+    """Leaves the transcript that the stand-in worker delivers for one audio channel of `clip`.
+
+    The worker prints one chunk every `delay_seconds`, keeps running for `linger_seconds`, prints `error` to standard
+    error, and exits with `exit_status`.
+    """
+    plan = {
+        "lines": [ballroom_scribe.gui.utils.encode_transcript_chunk(chunk) for chunk in chunks],
+        "delay_seconds": delay_seconds,
+        "linger_seconds": linger_seconds,
+        "exit_status": exit_status,
+        "error": error,
+    }
+    _transcript_plan(work_dir, clip, channel).write_text(json.dumps(plan), encoding="utf-8")
+
+
+def _worker_runs(work_dir: pathlib.Path, clip: pathlib.Path, channel: int) -> int:
+    """Returns how many times the stand-in worker has been started for one audio channel of `clip`."""
+    log = work_dir / _TRANSCRIPT_DIR_NAME / "runs.log"
+    if not log.exists():
+        return 0
+    return log.read_text(encoding="utf-8").splitlines().count(f"{clip.name} {channel}")
+
+
+def _speech_chunks(channel: int) -> list[ballroom_scribe.models.TranscriptChunk]:
+    """Returns `_SPEECH_SENTENCES` as speech chunks: the first two sentences in one chunk, the others in one each."""
+    sentences = [
+        [
+            ballroom_scribe.models.Word(
+                word=text,
+                start=start + index * _SPEECH_WORD_SPACING_SECONDS,
+                end=start + index * _SPEECH_WORD_SPACING_SECONDS + _SPEECH_WORD_SECONDS,
+            )
+            for index, text in enumerate(texts)
+        ]
+        for start, texts in _SPEECH_SENTENCES
+    ]
+    chunks: list[ballroom_scribe.models.TranscriptChunk] = []
+    for words in (sentences[0] + sentences[1], sentences[2], sentences[3]):
+        start_samples = round((words[0].start - 0.1) * _SPEECH_SAMPLE_RATE)
+        chunks.append(
+            ballroom_scribe.models.TranscriptChunk(
+                start_samples=start_samples,
+                sample_rate=_SPEECH_SAMPLE_RATE,
+                duration_samples=round((words[-1].end + 0.1) * _SPEECH_SAMPLE_RATE) - start_samples,
+                channel=channel,
+                words=tuple(words),
+            )
+        )
+    return chunks
+
+
+def _speech_words(waveform: ballroom_scribe.gui.WaveformWidget) -> list[str]:
+    return [word.word for word in waveform.speech]
+
+
+def _content_splitter(window: ballroom_scribe.gui.MainWindow) -> QtWidgets.QSplitter:
+    """Returns the splitter between the video pane and the table pane."""
+    root_splitter = window.centralWidget()
+    assert isinstance(root_splitter, QtWidgets.QSplitter)
+    content_splitter = root_splitter.widget(0)
+    assert isinstance(content_splitter, QtWidgets.QSplitter)
+    return content_splitter
+
+
+def _picture_pixels(fixture: _Fixture, grab: QtGui.QImage) -> np.ndarray:
+    """Returns the part of a grab of the window that shows the video picture, as an RGB array of device pixels."""
+    window = fixture.window
+    video_widget = window.findChild(QtMultimediaWidgets.QVideoWidget)
+    assert video_widget is not None
+    video_size = window.player.video_sink().videoSize()
+    scale = min(video_widget.width() / video_size.width(), video_widget.height() / video_size.height())
+    picture_width, picture_height = video_size.width() * scale, video_size.height() * scale
+    origin = video_widget.mapTo(window, QtCore.QPoint(0, 0))
+    ratio = grab.width() / window.width()
+    left = round((origin.x() + (video_widget.width() - picture_width) / 2) * ratio)
+    top = round((origin.y() + (video_widget.height() - picture_height) / 2) * ratio)
+    pixels = _image_pixels(grab)
+    # `Format_ARGB32` stores blue, green, red, alpha on little-endian machines.
+    return pixels[top : top + round(picture_height * ratio), left : left + round(picture_width * ratio), 2::-1]
+
+
+def _thumbnail(pixels: np.ndarray, rows: int = 9, columns: int = 16) -> np.ndarray:
+    """Averages an `(height, width, 3)` array over a coarse grid, for comparing pictures of different sizes."""
+    height, width = pixels.shape[0] // rows * rows, pixels.shape[1] // columns * columns
+    grid = pixels[:height, :width].reshape(rows, height // rows, columns, width // columns, 3)
+    return grid.astype(np.float64).mean(axis=(1, 3))
+
+
+def _grab_from_screen(fixture: _Fixture, *, screen_area: bool) -> QtGui.QPixmap:
+    """Grabs the window from the screen, which can include the native video surface that `QWidget.grab()` lacks.
+
+    Args:
+        fixture: The window under test, which must be a real window.
+        screen_area: Whether to grab the part of the screen that the window covers instead of the window itself.
+            A grab of the window leaves the video area black where the system puts the picture on the screen
+            separately from the rest of the window.
+    """
+    window = fixture.window
+    screen = window.screen() or fixture.app.primaryScreen()
+    if not screen_area:
+        return screen.grabWindow(window.winId())
+    area = window.geometry().translated(-screen.geometry().topLeft())
+    return screen.grabWindow(0, area.x(), area.y(), area.width(), area.height())
+
+
+def _shows_video_picture(fixture: _Fixture, grab: QtGui.QPixmap) -> bool:
+    """Returns whether a grab of the window shows the frame that the video sink holds."""
+    frame = fixture.window.player.video_sink().videoFrame().toImage()
+    if grab.isNull() or frame.isNull():
+        return False
+    picture = _picture_pixels(fixture, grab.toImage())
+    if min(picture.shape[:2]) < 90:
+        return False
+    difference = np.abs(_thumbnail(picture) - _thumbnail(_image_pixels(frame)[:, :, 2::-1])).mean()
+    return bool(difference <= 40.0)
+
+
+def _screen_area_shows_picture(fixture: _Fixture) -> bool | None:
+    """Returns the `screen_area` with which `_grab_from_screen` shows the video picture, or `None` if neither does.
+
+    Neither does when, for example, the system does not let this process record the screen.
+    """
+    for screen_area in (False, True):
+        if _shows_video_picture(fixture, _grab_from_screen(fixture, screen_area=screen_area)):
+            return screen_area
+    return None
+
+
+def _check_on_picture_caption_on_screen(fixture: _Fixture, caption: str) -> None:
+    """Compares screen grabs with captions on and off: only the lower part of the picture may differ.
+
+    Needs a real window, the caption on the picture, and a paused player. Prints a note instead of failing when
+    no grab of the screen shows the video picture.
+    """
+    window = fixture.window
+    captions_action = _action_named(window, "Closed Captions")
+
+    def show_caption(expected_subtitle: str) -> None:
+        with _delivered_frames(window) as frames:
+            captions_action.setChecked(bool(expected_subtitle))
+            _wait_until(
+                fixture.app,
+                lambda: bool(frames) and frames[-1].subtitle == expected_subtitle,
+                _FRAME_TIMEOUT_SECONDS,
+                f"a frame with the subtitle {expected_subtitle!r} before grabbing the screen",
+            )
+        _settle(fixture.app, _SCREENSHOT_SETTLE_SECONDS)
+
+    def grab_picture(screen_area: bool) -> np.ndarray:
+        return _picture_pixels(fixture, _grab_from_screen(fixture, screen_area=screen_area).toImage())
+
+    show_caption("")
+    screen_area = _screen_area_shows_picture(fixture)
+    if screen_area is None:
+        show_caption(caption)
+        print("  (skipped comparing screen grabs: they do not show the video picture)")
+        return
+    without_caption = grab_picture(screen_area)
+    show_caption(caption)
+    with_caption = grab_picture(screen_area)
+
+    changed = np.any(np.abs(with_caption.astype(np.int16) - without_caption.astype(np.int16)) > 24, axis=2)
+    height = changed.shape[0]
+    upper, lower = changed[: round(0.6 * height)], changed[round(0.6 * height) :]
+    work_dir = fixture.work_dir
+    _expect(
+        int(lower.sum()) >= 50,
+        f"The caption on the picture changed only {int(lower.sum())} pixel(s) of the lower part of the picture"
+        f" (see {work_dir / 'editor_screenshot.png'} for the final state)",
+    )
+    _expect(
+        not upper.any(),
+        f"Showing the caption changed {int(upper.sum())} pixel(s) in the upper part of the picture",
+    )
+
+
+def _give_captions_room_below(fixture: _Fixture) -> None:
+    """Lays out the window so that two lines of caption fit below the video picture.
+
+    The video and the table share the width equally, as in the default layout. Where large fonts make the menus,
+    toolbars, and controls so tall that the video pane is then too short for the picture and the captions, the
+    window is made taller.
+    """
+    window = fixture.window
+    content_splitter = _content_splitter(window)
+    view = window.findChild(ballroom_scribe.gui.CaptionedVideoWidget)
+    assert view is not None
+    width = content_splitter.width()
+    content_splitter.setSizes([width // 2, width - width // 2])
+    fixture.app.processEvents()
+    video_size = window.player.video_sink().videoSize()
+    _expect(not video_size.isEmpty(), "The size of the video is unknown, so captions cannot be placed")
+    picture_height = math.ceil(view.width() * video_size.height() / video_size.width())
+    missing_height = picture_height + _CAPTION_STRIP_ROOM - view.height()
+    if missing_height > 0:
+        window.resize(window.width(), window.height() + missing_height)
+        _settle(fixture.app, 0.1)
+
+
+def _check_transcribed_speech(fixture: _Fixture) -> None:
+    """Speech from the transcription worker shows as captions with the video and as words along the waveform."""
+    window = fixture.window
+    player = window.player
+    waveform = window.waveform
+    work_dir = fixture.work_dir
+    placement = ballroom_scribe.gui.CaptionedVideoWidget.Placement
+    captions_action = _action_named(window, "Closed Captions")
+    captions_button = window.findChild(QtWidgets.QToolButton, "captionsButton")
+    _expect(captions_button is not None, "The video controls have no CC button")
+    assert captions_button is not None
+    content_splitter = _content_splitter(window)
+    original_sizes = content_splitter.sizes()
+    original_window_size = window.size()
+    sentences = [" ".join(texts) for _, texts in _SPEECH_SENTENCES]
+    words = [text for _, texts in _SPEECH_SENTENCES for text in texts]
+
+    # Start from the first clip.
+    first = next(video for video in window.session.videos if video.input_video.name == fixture.clip.name)
+    second = next(video for video in window.session.videos if video.input_video.name == fixture.second_clip.name)
+    _expect(
+        isinstance(first, ballroom_scribe.gui.models.LoadedVideo)
+        and isinstance(second, ballroom_scribe.gui.models.LoadedVideo),
+        "Both clips must be loaded for the speech checks",
+    )
+    assert isinstance(first, ballroom_scribe.gui.models.LoadedVideo)
+    window.select_video(first.csv_file)
+    _wait_until(
+        fixture.app,
+        lambda: waveform.envelope is not None or waveform.is_error,
+        _WAVEFORM_TIMEOUT_SECONDS,
+        "the first clip's waveform before transcribing its speech",
+    )
+    _expect(not waveform.is_error, f"Waveform error: {waveform.status_message}")
+    channel = first.input_channel
+    _expect(
+        not captions_action.isEnabled() and player.caption_placement == placement.HIDDEN,
+        "Closed captions are available although the video has no transcript",
+    )
+
+    # 1. The worker's speech arrives chunk by chunk, for the active channel only.
+    chunks = _speech_chunks(channel)
+    other_channel_chunk = ballroom_scribe.models.TranscriptChunk(
+        start_samples=0,
+        sample_rate=_SPEECH_SAMPLE_RATE,
+        duration_samples=_SPEECH_SAMPLE_RATE,
+        channel=1 - channel,
+        words=(ballroom_scribe.models.Word(word="Elsewhere.", start=0.2, end=0.6),),
+    )
+    _leave_transcript(work_dir, fixture.clip, channel, chunks, delay_seconds=_SPEECH_CHUNK_DELAY_SECONDS)
+    _leave_transcript(work_dir, fixture.clip, 1 - channel, [other_channel_chunk])
+    window.reload_transcript()
+    _expect(window.is_transcribing, "reload_transcript did not start the transcription worker")
+    _wait_until(
+        fixture.app,
+        lambda: len(waveform.speech) > 0,
+        _TRANSCRIPTION_TIMEOUT_SECONDS,
+        "the first words from the transcription worker",
+    )
+    _expect(
+        window.is_transcribing and _speech_words(waveform) == words[: len(chunks[0].words)],
+        f"Expected the first chunk's words while the worker is still running, got {_speech_words(waveform)}"
+        f" (worker running: {window.is_transcribing})",
+    )
+    _expect(
+        window.transcription_status.startswith("Transcribing speech"),
+        f"Status bar label while transcribing: {window.transcription_status!r}",
+    )
+    _wait_until(
+        fixture.app,
+        lambda: not window.is_transcribing,
+        _TRANSCRIPTION_TIMEOUT_SECONDS,
+        "the transcription worker to finish",
+    )
+    _expect(_speech_words(waveform) == words, f"Words along the waveform: {_speech_words(waveform)}")
+    _expect(window.transcription_status == "", f"Status bar label after transcribing: {window.transcription_status!r}")
+    _expect(
+        captions_action.isEnabled() and captions_action.isChecked(),
+        "The CC button was not switched on once the video had captions",
+    )
+
+    # 2. The caption follows the playhead, and nothing shows between phrases.
+    for seconds, expected in ((1.2, sentences[0]), (4.5, ""), (5.2, sentences[2])):
+        player.seek(seconds)
+        fixture.app.processEvents()
+        _expect(player.caption_text == expected, f"Caption at {seconds} s is {player.caption_text!r}")
+
+    # 3. Zooming in splits the speech into more markers, and with the whole clip on screen every sentence is one
+    # marker. How many words fit side by side at the closest zoom depends on the size of the font, so the checks
+    # there are that no word is lost or out of order and that every sentence still starts a marker of its own.
+    waveform.set_window_seconds(2.0)
+    close_up = [marker.get_text() for marker in waveform.speech_markers]
+    sentence_starts = {texts[0] for _, texts in _SPEECH_SENTENCES}
+    _expect(
+        " ".join(close_up).split(" ") == words
+        and sentence_starts <= {text.split(" ")[0] for text in close_up}
+        and len(close_up) > len(sentences),
+        f"Speech markers with 2 s on screen: {close_up}",
+    )
+    waveform.set_window_seconds(waveform.width() / _SENTENCE_ZOOM_PIXELS_PER_SECOND)
+    zoomed_out = [marker.get_text() for marker in waveform.speech_markers]
+    _expect(zoomed_out == sentences, f"Speech markers with {waveform.window_seconds:.1f} s on screen: {zoomed_out}")
+    fixture.app.processEvents()
+    waveform_pixels = _image_pixels(waveform.grab().toImage())
+    band_rows = max(1, waveform_pixels.shape[0] // 10)
+    label_pixels = int(np.all(waveform_pixels[-band_rows:, :, :3] > _SPEECH_LABEL_BRIGHTNESS, axis=2).sum())
+    _expect(label_pixels >= 20, f"The bottom of the waveform shows {label_pixels} pixel(s) of speech labels")
+
+    # 4. Another video shows no speech of this one, and coming back shows it at once without transcribing again.
+    runs = _worker_runs(work_dir, fixture.clip, channel)
+    window.select_video(second.csv_file)
+    fixture.app.processEvents()
+    _expect(
+        not waveform.speech and player.caption_text == "" and not captions_action.isEnabled(),
+        f"The second clip shows the first clip's speech: {_speech_words(waveform)}",
+    )
+    window.select_video(first.csv_file)
+    fixture.app.processEvents()
+    _expect(
+        _speech_words(waveform) == words and captions_action.isEnabled(),
+        f"The first clip's speech was not shown at once after switching back: {_speech_words(waveform)}",
+    )
+    _wait_until(
+        fixture.app,
+        lambda: waveform.envelope is not None,
+        _WAVEFORM_TIMEOUT_SECONDS,
+        "the first clip's waveform after switching back",
+    )
+    _settle(fixture.app, 1.5)  # Longer than the delay after which the editor starts the worker.
+    _expect(
+        _worker_runs(work_dir, fixture.clip, channel) == runs and not window.is_transcribing,
+        "The worker ran again for a video whose transcript was complete",
+    )
+
+    # 5. The caption is below the picture while the pane has room there, and on the picture otherwise. Qt draws it
+    # with the frames it renders, so while paused the frame at the playhead has to be rendered again.
+    _give_captions_room_below(fixture)
+    with _delivered_frames(window) as frames:
+        player.seek(5.2)
+        _wait_until(
+            fixture.app,
+            lambda: any(abs(frame.seconds - 5.2) <= _FRAME_TOLERANCE_SECONDS for frame in frames),
+            _FRAME_TIMEOUT_SECONDS,
+            "a frame at the caption used for the placement checks",
+        )
+        _expect_paused(fixture, "before moving the caption onto the picture")
+        _expect(
+            player.caption_placement == placement.BELOW and all(not frame.subtitle for frame in frames),
+            f"With the video and the table side by side, the caption placement is {player.caption_placement.name}"
+            f" and the frames carry {sorted({frame.subtitle for frame in frames})}",
+        )
+
+        frames.clear()
+        content_splitter.setSizes([content_splitter.width() - 100, 100])
+        _wait_until(
+            fixture.app,
+            lambda: player.caption_placement == placement.OVERLAY,
+            _FRAME_TIMEOUT_SECONDS,
+            f"the caption to move onto the picture (splitter sizes {content_splitter.sizes()})",
+        )
+        _wait_until(
+            fixture.app,
+            lambda: bool(frames) and frames[-1].subtitle == sentences[2],
+            _FRAME_TIMEOUT_SECONDS,
+            "a frame that carries the caption after it moved onto the picture",
+        )
+        _expect_paused(fixture, "after the caption moved onto the picture")
+
+        # 6. The CC button hides the caption and the C key shows it again (not while the table has focus).
+        frames.clear()
+        QtTest.QTest.mouseClick(captions_button, QtCore.Qt.MouseButton.LeftButton)
+        fixture.app.processEvents()
+        _expect(
+            not captions_action.isChecked() and player.caption_placement == placement.HIDDEN,
+            f"Clicking CC left the captions {player.caption_placement.name}",
+        )
+        _wait_until(
+            fixture.app,
+            lambda: bool(frames) and frames[-1].subtitle == "",
+            _FRAME_TIMEOUT_SECONDS,
+            "a frame without the caption after clicking CC",
+        )
+        _expect(player.caption_text == sentences[2], "Hiding the captions lost the caption at the playhead")
+
+        frames.clear()
+        window.activateWindow()
+        waveform.setFocus(QtCore.Qt.FocusReason.MouseFocusReason)
+        fixture.app.processEvents()
+        if waveform.hasFocus():
+            QtTest.QTest.keyClick(waveform, QtCore.Qt.Key.Key_C)
+            fixture.app.processEvents()
+        else:
+            _expect(fixture.windowed, "Could not focus the waveform widget")
+            captions_action.trigger()
+        _expect(
+            captions_action.isChecked() and player.caption_placement == placement.OVERLAY,
+            f"The C key left the captions {player.caption_placement.name}",
+        )
+        _wait_until(
+            fixture.app,
+            lambda: bool(frames) and frames[-1].subtitle == sentences[2],
+            _FRAME_TIMEOUT_SECONDS,
+            "a frame that carries the caption after pressing C",
+        )
+
+    # 7. On a real screen, the caption shows in the lower part of the picture and changes nothing else in it.
+    if fixture.windowed:
+        _check_on_picture_caption_on_screen(fixture, sentences[2])
+
+    _give_captions_room_below(fixture)
+    _wait_until(
+        fixture.app,
+        lambda: player.caption_placement == placement.BELOW,
+        _FRAME_TIMEOUT_SECONDS,
+        "the caption to move back below the picture",
+    )
+    content_splitter.setSizes(original_sizes)
+    window.resize(original_window_size)
+    fixture.app.processEvents()
+    _focus_table(fixture)
+
+
+def _check_failed_transcription(fixture: _Fixture) -> None:
+    """A worker that fails leaves the speech it delivered on screen and switches transcription off."""
+    window = fixture.window
+    waveform = window.waveform
+    work_dir = fixture.work_dir
+    transcribe_action = _action_named(window, "Transcribe Speech in Background")
+    _expect(transcribe_action is window.transcribe_speech_action, "The Tools menu has another transcription action")
+    video = next(video for video in window.session.videos if video.input_video.name == fixture.clip.name)
+    assert isinstance(video, ballroom_scribe.gui.models.LoadedVideo)
+    chunks = _speech_chunks(video.input_channel)
+    words = [text for _, texts in _SPEECH_SENTENCES for text in texts]
+
+    _leave_transcript(
+        work_dir,
+        fixture.clip,
+        video.input_channel,
+        chunks[:1],
+        exit_status=3,
+        error="OSError: The model could not be downloaded.",
+    )
+    window.reload_transcript()
+    _expect(window.is_transcribing, "reload_transcript did not start the failing worker")
+    _wait_until(
+        fixture.app,
+        lambda: not window.is_transcribing,
+        _TRANSCRIPTION_TIMEOUT_SECONDS,
+        "the failing transcription worker to exit",
+    )
+    _expect(not transcribe_action.isChecked(), "A failed worker did not switch background transcription off")
+    _expect(
+        _speech_words(waveform) == words[: len(chunks[0].words)],
+        f"The words that the failed worker delivered are not on screen: {_speech_words(waveform)}",
+    )
+    _expect(
+        "failed" in window.statusBar().currentMessage(),
+        f"Status bar after the worker failed: {window.statusBar().currentMessage()!r}",
+    )
+    _expect(window.transcription_status == "", f"Status bar label after the failure: {window.transcription_status!r}")
+    _settle(fixture.app, 1.5)
+    _expect(not window.is_transcribing, "The worker was started again although transcription is switched off")
+
+    # Switching it back on transcribes the video again.
+    _leave_transcript(work_dir, fixture.clip, video.input_channel, chunks)
+    transcribe_action.trigger()
+    _expect(transcribe_action.isChecked(), "Could not switch background transcription back on")
+    _wait_until(
+        fixture.app,
+        lambda: not window.is_transcribing and _speech_words(waveform) == words,
+        _TRANSCRIPTION_TIMEOUT_SECONDS,
+        "the whole transcript after switching background transcription back on",
+    )
+
+
+def _check_close_during_transcription(fixture: _Fixture) -> None:
+    """A window closes promptly while its transcription worker is still running, and the worker goes with it."""
+    work_dir = fixture.work_dir
+    heartbeat = work_dir / _TRANSCRIPT_DIR_NAME / "heartbeat.txt"
+    heartbeat.unlink(missing_ok=True)
+    _leave_transcript(work_dir, fixture.second_clip, 0, _speech_chunks(0)[:1], linger_seconds=120.0)
+
+    window = ballroom_scribe.gui.MainWindow(transcription_command=_transcription_command(work_dir))
+    window.show()
+    window.add_videos(
+        [
+            ballroom_scribe.cli.arguments.InputCacheArgs(
+                input_video=fixture.second_clip,
+                input_channel=0,
+                parent_cache_dir=work_dir,
+            )
+        ]
+    )
+    try:
+        _wait_until(
+            fixture.app,
+            lambda: window.is_transcribing and len(window.waveform.speech) > 0 and heartbeat.exists(),
+            _WAVEFORM_TIMEOUT_SECONDS,
+            "the slow transcription worker to deliver its first words",
+        )
+        started = time.monotonic()
+        _expect(window.close(), "The window refused to close while the worker was running")
+        fixture.app.processEvents()
+        elapsed = time.monotonic() - started
+        _expect(
+            elapsed < _CLOSE_TIMEOUT_SECONDS,
+            f"Closing took {elapsed:.1f} s while the transcription worker was running (it was not killed?)",
+        )
+        last_beat = heartbeat.read_text(encoding="utf-8")
+        _settle(fixture.app, 0.5)
+        _expect(
+            heartbeat.read_text(encoding="utf-8") == last_beat,
+            "The transcription worker kept running after its window was closed",
+        )
+    finally:
+        _transcript_plan(work_dir, fixture.second_clip, 0).unlink(missing_ok=True)
+        if window.isVisible():
+            window.close()
+
+
 def _screenshot_path(work_dir: pathlib.Path) -> pathlib.Path:
     return work_dir / "editor_screenshot.png"
 
@@ -3010,8 +3677,7 @@ def _save_screenshot(fixture: _Fixture) -> None:
     pixmap = QtGui.QPixmap()
     if fixture.windowed:
         # Grabbing from the screen includes the native video surface, which `QWidget.grab()` cannot capture.
-        screen = fixture.window.screen() or fixture.app.primaryScreen()
-        pixmap = screen.grabWindow(fixture.window.winId())
+        pixmap = _grab_from_screen(fixture, screen_area=bool(_screen_area_shows_picture(fixture)))
     if pixmap.isNull():
         pixmap = fixture.window.grab()
     screenshot = _screenshot_path(fixture.work_dir)
@@ -3041,8 +3707,11 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Edit comments as icons and as text", _check_comment_column),
         ("Save CSV and reload it", _check_save_round_trip),
         ("Keep an offline video in the drop-down", _check_offline_videos),
+        ("Show transcribed speech as captions and along the waveform", _check_transcribed_speech),
+        ("Keep the speech of a transcription worker that fails", _check_failed_transcription),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),
+        ("Close a window while speech is being transcribed", _check_close_during_transcription),
         ("Close the window while audio is being extracted", _check_close_during_extraction),
     )
     for number, (description, step) in enumerate(steps, start=1):
@@ -3087,8 +3756,10 @@ def main(argv: list[str] | None = None) -> int:
             audio_args=_LONG_CLIP_AUDIO_ARGS,
         )
 
+        _write_transcription_worker(work_dir)
+
         app = QtWidgets.QApplication(sys.argv)
-        window = ballroom_scribe.gui.MainWindow()
+        window = ballroom_scribe.gui.MainWindow(transcription_command=_transcription_command(work_dir))
         _expect(not app.windowIcon().isNull(), "Application window icon was not set")
         _expect(not window.windowIcon().isNull(), "MainWindow icon was not set")
         window.show()

@@ -45,15 +45,15 @@ flowchart TD
     MusicValleyDetector -->|"Music Valleys"| SpeechTranscriber
     SpeechTranscriber -->|"Transcript Chunks"| EventDetector
     EventDetector -->|"Events"| EventRecorder
-    InputVideo -->|"File Path"| EventRecorder
     EventRecorder -->|"CSV Rows"| OutputCSV["Output CSV (.csv)"]
     OutputCSV <-->|"Read / Save CSV"| TimestampEditor
+    SpeechTranscriber -->|"Transcript Chunks"| TimestampEditor
     InputVideo -->|"Playback"| TimestampEditor
 
     CacheDir[("Cache Directory (per video)")]
     AudioClassifier <-->|"Probabilities (.npy)"| CacheDir
-    SpeechTranscriber <-->|"Speech (.csv)"| CacheDir
     ExtractAudio <-->|"Mono Audio (.wav)"| CacheDir
+    SpeechTranscriber <-->|"Speech (.csv)"| CacheDir
     EventDetector <-->|"Events (.json)"| CacheDir
     TimestampEditor <-->|"Mono Audio (.wav), Waveform (.npz)"| CacheDir
 ```
@@ -83,6 +83,9 @@ Each stage that writes to the cache directory skips its work if its output file 
 interrupted run resumes where it left off. To make this safe, cache files are written atomically
 ([atomic_path.py](ballroom_scribe/utils/atomic_path.py)): each file is first written under a temporary name (e.g.,
 `Audio-Channel-0.partial.wav`) and renamed to its final name only once it is complete.
+
+The timestamp editor runs stages 1–4 itself, in a background process, on the video you are viewing, so that it can show
+what is being said. It reads and writes the same cache as the pipeline.
 
 ## Requirements
 
@@ -241,6 +244,14 @@ including Qt multimedia backend diagnostics, to the console.
     *   **Add Event** (<kbd>Ctrl</kbd> + <kbd>E</kbd>) inserts a row for the active video at the playhead and opens it
         for editing.
     *   **Delete Event** (<kbd>Ctrl</kbd> + <kbd>D</kbd>) deletes all selected rows
+*   **Transcribed speech**: The editor transcribes the speech of the video you are viewing in the background and shows
+    it as it is transcribed. A video that the pipeline has already processed shows its speech within seconds.
+    *   Closed captions appear below the picture when the video pane has room there, and on the picture otherwise. The
+        **CC** button (<kbd>C</kbd>) hides them.
+    *   Each word appears along the bottom of the waveform at the time it is spoken. Words merge into phrases as you
+        zoom out, and every sentence keeps its own marker while there is room for one.
+    *   Transcription uses the same models, the same first-run downloads, and the same choice of GPU or CPU as the
+        pipeline. **Tools → Transcribe Speech in Background** switches it off.
 *   **Comments**: The Comment column holds free-text notes for people reading the CSV.
 *   **Missing videos**: If a CSV references a video that cannot be opened (perhaps because it was moved or renamed), you
     can still edit rows for that video. Use **File → Locate Video…** to relink. **Open Videos…** also offers to relink
@@ -260,6 +271,7 @@ including Qt multimedia backend diagnostics, to the console.
 | <kbd>Ctrl</kbd> + <kbd>J</kbd> / <kbd>Ctrl</kbd> + <kbd>L</kbd>, <kbd>Shift</kbd> + <kbd>J</kbd>¹ / <kbd>Shift</kbd> + <kbd>L</kbd>¹ | Skip −10 s / +10 s |
 | <kbd>J</kbd>¹ / <kbd>L</kbd>¹ | Step −1 s / +1 s |
 | <kbd>,</kbd> / <kbd>.</kbd> | Step −0.1 s / +0.1 s |
+| <kbd>C</kbd>¹ | Show / hide closed captions |
 | <kbd>←</kbd> / <kbd>→</kbd> (<kbd>Shift</kbd> = ±0.1 s) | Step when video player or waveform has focus |
 | <kbd>↑</kbd> <kbd>↓</kbd> <kbd>←</kbd> <kbd>→</kbd>, <kbd>Tab</kbd> (table focused) | Move the current (framed) cell; entering another row jumps to its inpoint |
 | <kbd>Shift</kbd> + click, <kbd>Shift</kbd> + <kbd>↑</kbd> / <kbd>Shift</kbd> + <kbd>↓</kbd>, <kbd>Ctrl</kbd> + click (<kbd>⌘</kbd> on macOS), <kbd>Ctrl</kbd> + <kbd>A</kbd> (table) | Select a range of rows, toggle individual rows, or select all rows |
@@ -331,6 +343,10 @@ It prints a work directory containing the clip, CSVs, caches, and `editor_screen
 `SMOKE TEST FAILED: ...` message on the first failed expectation. In headless mode, the screenshot's video area is blank
 because the native video surface cannot be captured offscreen; frame rendering is verified through the video sink
 instead.
+
+The test never runs the pipeline's models. A stand-in for the transcription process delivers a short transcript, which
+the test follows into the captions and the waveform. Captions on the picture are verified through the video sink, and
+with `--windowed` also in a grab of the screen.
 
 ## Tuning PANN Thresholds
 

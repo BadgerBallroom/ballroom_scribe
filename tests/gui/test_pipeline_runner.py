@@ -75,6 +75,44 @@ class TestBuildCommand(unittest.TestCase):
             )
 
 
+class TestBuildTranscriptionCommand(unittest.TestCase):
+    """Unit tests for `_build_transcription_command`."""
+
+    def test_appends_the_video_to_the_command_of_the_worker(self):
+        video_input = ballroom_scribe.cli.arguments.InputCacheArgs(
+            input_video=_VIDEO_A,
+            input_channel=1,
+            parent_cache_dir=_CACHE_A,
+        )
+
+        command = ballroom_scribe.gui.pipeline_runner._build_transcription_command(
+            video_input,
+            ("python", "-u", "-m", "worker"),
+        )
+
+        self.assertEqual(
+            command,
+            ["python", "-u", "-m", "worker", "-i", str(_VIDEO_A), "1", "-c", str(_CACHE_A)],
+        )
+
+    def test_rejects_an_empty_command(self):
+        video_input = ballroom_scribe.cli.arguments.InputCacheArgs(
+            input_video=_VIDEO_A,
+            input_channel=1,
+            parent_cache_dir=_CACHE_A,
+        )
+
+        with self.assertRaises(ValueError):
+            ballroom_scribe.gui.pipeline_runner._build_transcription_command(video_input, ())
+
+
+def _make_byte_array(data: bytes) -> MagicMock:
+    """Helper to create a stand-in for the `QByteArray` that `QProcess` returns."""
+    byte_array = MagicMock()
+    byte_array.data.return_value = data
+    return byte_array
+
+
 class TestPipelineRunner(unittest.TestCase):
     """Unit tests for `PipelineRunner` with a mocked `QProcess`."""
 
@@ -82,11 +120,11 @@ class TestPipelineRunner(unittest.TestCase):
         self.mock_qprocess_cls = self.enterContext(patch.object(QtCore, "QProcess", autospec=True))
         self.mock_process = self.mock_qprocess_cls.return_value
         self.mock_process.readyReadStandardOutput = MagicMock()
+        self.mock_process.readyReadStandardError = MagicMock()
         self.mock_process.finished = MagicMock()
+        self.mock_process.errorOccurred = MagicMock()
         self.mock_process.state.return_value = QtCore.QProcess.ProcessState.NotRunning
-        fake_byte_array = MagicMock()
-        fake_byte_array.data.return_value = b"Extracting audio...\n"
-        self.mock_process.readAllStandardOutput.return_value = fake_byte_array
+        self.mock_process.readAllStandardOutput.return_value = _make_byte_array(b"Extracting audio...\n")
 
     def test_start_cancel_and_signals(self):
         runner = ballroom_scribe.gui.PipelineRunner()
@@ -94,6 +132,9 @@ class TestPipelineRunner(unittest.TestCase):
         exit_codes: list[int] = []
         runner.output.connect(outputs.append)
         runner.finished.connect(exit_codes.append)
+        self.mock_process.setProcessChannelMode.assert_called_once_with(
+            QtCore.QProcess.ProcessChannelMode.MergedChannels
+        )
 
         inputs = [
             ballroom_scribe.cli.arguments.InputCacheArgs(
@@ -113,6 +154,138 @@ class TestPipelineRunner(unittest.TestCase):
         runner._on_finished(0, QtCore.QProcess.ExitStatus.NormalExit)
         self.assertEqual(outputs, ["Extracting audio...\n"])
         self.assertEqual(exit_codes, [0])
+
+    def test_reports_a_killed_process_as_failed(self):
+        runner = ballroom_scribe.gui.PipelineRunner()
+        exit_codes: list[int] = []
+        runner.finished.connect(exit_codes.append)
+
+        runner._on_finished(9, QtCore.QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(exit_codes, [-1])
+
+    def test_reports_a_program_that_could_not_be_started_as_failed(self):
+        runner = ballroom_scribe.gui.PipelineRunner()
+        exit_codes: list[int] = []
+        runner.finished.connect(exit_codes.append)
+
+        # `QProcess` reports a crash through `finished` as well, so only a failed start is reported here.
+        runner._on_error_occurred(QtCore.QProcess.ProcessError.Crashed)
+        self.assertEqual(exit_codes, [])
+        runner._on_error_occurred(QtCore.QProcess.ProcessError.FailedToStart)
+        self.assertEqual(exit_codes, [-1])
+
+
+class TestTranscriptionRunner(unittest.TestCase):
+    """Unit tests for `PipelineRunner` running the transcription worker, with a mocked `QProcess`."""
+
+    def setUp(self):
+        self.mock_qprocess_cls = self.enterContext(patch.object(QtCore, "QProcess", autospec=True))
+        self.mock_process = self.mock_qprocess_cls.return_value
+        self.mock_process.readyReadStandardOutput = MagicMock()
+        self.mock_process.readyReadStandardError = MagicMock()
+        self.mock_process.finished = MagicMock()
+        self.mock_process.errorOccurred = MagicMock()
+        self.mock_process.state.return_value = QtCore.QProcess.ProcessState.NotRunning
+        self.mock_process.canReadLine.return_value = False
+        self.mock_process.readAllStandardOutput.return_value = _make_byte_array(b"")
+        self.mock_process.readAllStandardError.return_value = _make_byte_array(b"")
+
+        self.runner = ballroom_scribe.gui.PipelineRunner(merge_output=False)
+        self.outputs: list[str] = []
+        self.error_outputs: list[str] = []
+        self.exit_codes: list[int] = []
+        self.runner.output.connect(self.outputs.append)
+        self.runner.error_output.connect(self.error_outputs.append)
+        self.runner.finished.connect(self.exit_codes.append)
+
+        self.video_input = ballroom_scribe.cli.arguments.InputCacheArgs(
+            input_video=_VIDEO_A,
+            input_channel=1,
+            parent_cache_dir=_CACHE_A,
+        )
+
+    def test_keeps_standard_output_apart_from_standard_error(self):
+        self.mock_process.setProcessChannelMode.assert_called_once_with(
+            QtCore.QProcess.ProcessChannelMode.SeparateChannels
+        )
+
+    def test_start_transcription_runs_the_worker_on_the_video(self):
+        self.runner.start_transcription(self.video_input, ("python", "-m", "worker"))
+
+        self.mock_process.start.assert_called_once_with(
+            "python",
+            ["-m", "worker", "-i", str(_VIDEO_A), "1", "-c", str(_CACHE_A)],
+        )
+
+    def test_start_transcription_refuses_while_a_worker_is_running(self):
+        self.mock_process.state.return_value = QtCore.QProcess.ProcessState.Running
+
+        with self.assertRaises(RuntimeError):
+            self.runner.start_transcription(self.video_input, ("python", "-m", "worker"))
+
+        self.mock_process.start.assert_not_called()
+
+    def test_standard_output_arrives_one_complete_line_at_a_time(self):
+        # Two complete lines have arrived, one of them with a Windows line ending.
+        self.mock_process.canReadLine.side_effect = [True, True, False]
+        self.mock_process.readLine.side_effect = [_make_byte_array(b'{"n": 1}\n'), _make_byte_array(b'{"n": 2}\r\n')]
+
+        self.runner._on_ready_read()
+
+        self.assertEqual(self.outputs, ['{"n": 1}', '{"n": 2}'])
+        # Whatever follows the last line ending stays in the process until its line is complete.
+        self.mock_process.readAllStandardOutput.assert_not_called()
+
+    def test_unfinished_line_is_dropped_when_the_worker_exits(self):
+        self.mock_process.canReadLine.side_effect = [True, False]
+        self.mock_process.readLine.side_effect = [_make_byte_array(b'{"n": 1}\n')]
+        self.mock_process.readAllStandardOutput.return_value = _make_byte_array(b'{"n": 2')
+
+        self.runner._on_finished(9, QtCore.QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(self.outputs, ['{"n": 1}'])
+        self.mock_process.readAllStandardOutput.assert_called_once_with()
+        self.assertEqual(self.exit_codes, [-1])
+
+    def test_standard_error_arrives_separately(self):
+        self.mock_process.readAllStandardError.return_value = _make_byte_array(b"Checking input videos...\n")
+
+        self.runner._on_ready_read_error()
+
+        self.assertEqual(self.error_outputs, ["Checking input videos...\n"])
+        self.assertEqual(self.outputs, [])
+
+    def test_remaining_standard_error_is_delivered_before_the_exit_status(self):
+        self.mock_process.readAllStandardError.return_value = _make_byte_array(b"OSError: download failed\n")
+        events: list[str | int] = []
+        self.runner.error_output.connect(events.append)
+        self.runner.finished.connect(events.append)
+
+        self.runner._on_finished(1, QtCore.QProcess.ExitStatus.NormalExit)
+
+        self.assertEqual(events, ["OSError: download failed\n", 1])
+
+    def test_shutdown_kills_the_worker_and_waits_for_it_to_exit(self):
+        self.mock_process.state.return_value = QtCore.QProcess.ProcessState.Running
+        self.mock_process.waitForFinished.return_value = True
+
+        self.assertTrue(self.runner.shutdown(2.5))
+
+        self.mock_process.kill.assert_called_once_with()
+        self.mock_process.waitForFinished.assert_called_once_with(2500)
+
+    def test_shutdown_reports_a_worker_that_does_not_exit_in_time(self):
+        self.mock_process.state.return_value = QtCore.QProcess.ProcessState.Running
+        self.mock_process.waitForFinished.return_value = False
+
+        self.assertFalse(self.runner.shutdown(0.5))
+
+    def test_shutdown_without_a_running_worker_does_nothing(self):
+        self.assertTrue(self.runner.shutdown(2.5))
+
+        self.mock_process.kill.assert_not_called()
+        self.mock_process.waitForFinished.assert_not_called()
 
 
 if __name__ == "__main__":

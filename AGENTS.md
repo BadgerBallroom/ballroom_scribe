@@ -125,8 +125,17 @@
     transcription, or LLM calls, and write them through
     `ballroom_scribe.utils.atomic_path` so that existence implies completeness.
     `atomic_path` uses a deterministic temporary name, so ensure a single writer
-    per file at a time (the GUI de-duplicates in-flight waveform loads and stops
-    its own extraction before launching the pipeline).
+    per file at a time (the GUI de-duplicates in-flight waveform loads, starts
+    its transcription worker only once the waveform is ready, and stops its own
+    extraction and that worker before launching the pipeline).
+*   **The pipeline never runs inside the GUI process**:
+    `ballroom_scribe.gui.run_transcription_worker` is the one GUI module that
+    runs the pipeline (`TranscriptionPipeline`), and it only ever runs as a
+    child process (`python -m ballroom_scribe.gui.run_transcription_worker`)
+    that `MainWindow` starts for the active video and kills when the video,
+    channel, or cache directory changes, when the window closes, and before it
+    launches `find_timestamps.py`. Its standard output carries nothing but the
+    transcript, one `encode_transcript_chunk` line per speech chunk.
 *   **Cancellable background subprocesses**: Long-running subprocesses started
     from the GUI (e.g., `ffmpeg` in `extract_audio`) take an optional
     `threading.Event` and poll it around `subprocess.Popen.wait(timeout=...)`,
@@ -206,9 +215,10 @@ these conventions for what does and doesn't have unit tests:
     `AudioChunk`, `EventRecord`, `RunLengthEncoding`, `WaveformEnvelope`).
 *   **GUI services and table models (`ballroom_scribe/gui/` →
     `tests/gui/test_*.py`)**: Non-widget GUI logic (`VideoSession`,
-    `EventTableModel`, `PipelineRunner`, `WaveformLoader._prepare_envelope`) is
-    unit-tested headlessly. Tests that import `PySide6` skip cleanly via
-    `unittest.SkipTest` when the optional GUI dependency is not installed.
+    `EventTableModel`, `PipelineRunner`, `run_transcription_worker`,
+    `WaveformLoader._prepare_envelope`) is unit-tested headlessly. Tests that
+    import `PySide6` skip cleanly via `unittest.SkipTest` when the optional GUI
+    dependency is not installed.
 *   **Lazy exports and import footprint (`tests/test_lazy_exports.py`,
     `tests/gui/test_import_footprint.py`)**: Regression tests verify that every
     package's `__init__.pyi` exports are sorted and resolvable — both lazily and
@@ -235,11 +245,12 @@ these conventions for what does and doesn't have unit tests:
     `edit_timestamps.py`), interactive Streamlit apps
     (`tune_pann_thresholds.py`), the end-to-end GUI smoke test
     (`smoke_test_editor.py`), and thin Qt painting/wiring widgets, dialogs,
-    and delegates (`MainWindow`, `VideoPlayerWidget`, `WaveformWidget`,
-    `EventTableView`, `PipelineDialog`, `AutocompleteDelegate`,
-    `CurrentCellDelegate`) do not have unit tests; the smoke test drives
-    them, and the model operations they trigger (e.g.
-    `EventTableModel.fill`) are unit-tested.
+    and delegates (`MainWindow`, `VideoPlayerWidget`, `CaptionedVideoWidget`,
+    `WaveformWidget`, `EventTableView`, `PipelineDialog`,
+    `AutocompleteDelegate`, `CurrentCellDelegate`) do not have unit tests; the
+    smoke test drives them, and the model operations and pure helpers they
+    rely on (e.g. `EventTableModel.fill`, `merge_speech_markers`,
+    `layout_captions`) are unit-tested.
 *   **Pure data containers (`ballroom_scribe/models/`,
     `ballroom_scribe/gui/models/`)**: Frozen dataclasses that only declare
     fields or trivial one-line formatting properties (e.g., `Event`,

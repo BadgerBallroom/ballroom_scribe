@@ -1,5 +1,6 @@
-"""Custom `QPainter` waveform widget with click-to-seek, recentering drift, zoom, scrolling, and event markers."""
+"""Custom `QPainter` waveform widget with click-to-seek, recentering drift, zoom, scrolling, markers, and speech."""
 
+import bisect
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ import numpy as np
 from PySide6 import QtCore, QtGui, QtWidgets
 
 import ballroom_scribe.gui.models
+import ballroom_scribe.gui.utils
+import ballroom_scribe.models
 import ballroom_scribe.utils
 
 _MIN_WINDOW_SECONDS = 2.0
@@ -23,6 +26,15 @@ _ASYNC_SNAP_TOLERANCE_SECONDS = 0.05
 _CENTER_EPSILON = 1e-6
 _RULER_HEIGHT = 22
 _TICK_STEPS = (0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0)
+_SPEECH_FONT_POINT_SIZE = 9
+_SPEECH_BAND_PADDING = 4  # Added to the height of a line of text to get the height of the speech band.
+_SPEECH_LABEL_MARGIN = 3  # Between the edge of a speech label's background and its text.
+_SPEECH_LABEL_GAP = 2  # Between a speech label's background and the tick of the next speech marker.
+_SPEECH_LABEL_PADDING = 2 * _SPEECH_LABEL_MARGIN + _SPEECH_LABEL_GAP
+_SPEECH_MIN_TEXT_PIXELS = 14  # A speech marker with less room than this for its text shows only its tick.
+# A speech label that is cut off ends less than this many line heights before the end of its room: its ellipsis and
+# the first character that did not fit are together narrower than that.
+_SPEECH_ELLIPSIS_LINE_HEIGHTS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,8 +75,76 @@ def _paint_focus_frame(painter: QtGui.QPainter, rect: QtCore.QRect) -> None:
     painter.restore()
 
 
+def _start_seconds(chunk: ballroom_scribe.models.TranscriptChunk) -> float:
+    return chunk.start_seconds
+
+
+def _start_of_label(words: Sequence[ballroom_scribe.models.Word], min_characters: int) -> tuple[str, bool]:
+    """Returns the start of the label that `words` make up, and whether that is the whole label.
+
+    The words are joined by spaces, as `TranscriptChunk.get_text` joins them, up to the word with which the text gets
+    longer than `min_characters`.
+    """
+    texts: list[str] = []
+    length = -1
+    for word in words:
+        texts.append(word.word)
+        length += 1 + len(word.word)
+        if length > min_characters:
+            break
+    return " ".join(texts), len(texts) == len(words)
+
+
+def _fit_label(
+    words: Sequence[ballroom_scribe.models.Word],
+    room: float,
+    visible: float,
+    metrics: QtGui.QFontMetrics,
+) -> str:
+    """Returns the text to draw for the label that `words` make up.
+
+    When the waveform is zoomed far out, a label can hold thousands of words of which a few can be seen, and it is
+    drawn again with every repaint. So only a start of the label is measured, long enough to decide what to draw: one
+    that is probably wide enough at first, and a longer one as long as it turns out not to be.
+
+    Args:
+        words: The words of the label, which are joined by spaces.
+        room: The pixels that the label may take up. A wider label is cut off with an ellipsis.
+        visible: How many pixels of the label can be seen, counted from its start. A label reaches beyond them when
+            it runs past the edge of the widget.
+        metrics: The metrics of the font in which the label is drawn.
+
+    Returns:
+        The label if it fits in `room`, and otherwise the label cut off to fit, which is an empty string if there is
+        too little room for any text. If `room` reaches well beyond `visible`, the result may instead be a start of
+        the label, which looks the same in the part that can be seen.
+    """
+    # Whether a label is cut off shows only near the end of its room, where the ellipsis goes. That is out of sight
+    # if the room reaches further than this.
+    in_sight = visible + _SPEECH_ELLIPSIS_LINE_HEIGHTS * metrics.height()
+    # The words were measured one by one, which can differ from the whole label by a pixel or two.
+    enough = min(room, in_sight) + _SPEECH_LABEL_GAP
+    characters = int(max(enough, 0.0) / max(metrics.averageCharWidth(), 1)) + 1
+    while True:
+        text, is_whole = _start_of_label(words, characters)
+        text_width = metrics.horizontalAdvance(text)
+        if is_whole or text_width > enough:
+            break
+        characters *= 2
+    if text_width <= room + _SPEECH_LABEL_GAP:
+        return text
+    if room < _SPEECH_MIN_TEXT_PIXELS:
+        return ""
+    return metrics.elidedText(text, QtCore.Qt.TextElideMode.ElideRight, int(room))
+
+
 class WaveformWidget(QtWidgets.QWidget):
-    """Renders a `WaveformEnvelope` with zoom, click-to-seek, 5 s recentering drift, drag/scroll-to-pan, and markers."""
+    """Renders a `WaveformEnvelope` with zoom, click-to-seek, 5 s recentering drift, drag/scroll-to-pan, and markers.
+
+    The transcribed speech of the audio (see `set_speech`) is drawn in a band along the bottom of the waveform: each
+    word at the time it is spoken, with words merged into one marker where their labels would overlap at the current
+    zoom (see `merge_speech_markers`).
+    """
 
     seek_requested = QtCore.Signal(float)
     step_requested = QtCore.Signal(float)
@@ -89,6 +169,18 @@ class WaveformWidget(QtWidgets.QWidget):
         self._is_offline: bool = False
         self._markers: tuple[_Marker, ...] = ()
         self._selected_rows: frozenset[int] = frozenset()
+
+        self._transcript: tuple[ballroom_scribe.models.TranscriptChunk, ...] = ()
+        self._speech: tuple[ballroom_scribe.models.Word, ...] = ()
+        self._speech_widths: list[float] = []
+        # The width of each distinct word in the font identified by `_speech_font_key`.
+        self._speech_width_of_text: dict[str, float] = {}
+        self._speech_font_key: str = ""
+        self._speech_space_width: float = 0.0
+        self._speech_markers: tuple[ballroom_scribe.models.TranscriptChunk, ...] = ()
+        # The zoom, in pixels per second, for which `_speech_markers` were merged, or `None` if they are out of date.
+        self._speech_markers_zoom: float | None = None
+        self._speech_status: str = ""
 
         self._pressing: bool = False
         self._dragging: bool = False
@@ -140,6 +232,67 @@ class WaveformWidget(QtWidgets.QWidget):
         """Returns the visible span of the waveform in seconds."""
         return self._window_seconds
 
+    @property
+    def speech(self) -> tuple[ballroom_scribe.models.Word, ...]:
+        """Returns the transcribed words drawn along the bottom of the waveform (see `set_speech`)."""
+        return self._speech
+
+    @property
+    def speech_markers(self) -> tuple[ballroom_scribe.models.TranscriptChunk, ...]:
+        """Returns the speech markers at the current zoom: the words of `speech`, merged where labels would overlap.
+
+        Each marker is a transcript chunk that starts at its first word and whose text is the marker's label; see
+        `merge_speech_markers`. The words are merged again only after the zoom, the widget's width, the font, or the
+        words changed, so the markers stay as they are while the waveform scrolls.
+        """
+        self._measure_speech()
+        zoom = self.width() / self._window_seconds
+        if self._speech_markers_zoom != zoom:
+            self._speech_markers = ballroom_scribe.gui.utils.merge_speech_markers(
+                self._transcript,
+                self._speech_widths,
+                pixels_per_second=zoom,
+                space_width=self._speech_space_width,
+                label_padding=_SPEECH_LABEL_PADDING,
+            )
+            self._speech_markers_zoom = zoom
+        return self._speech_markers
+
+    @property
+    def speech_status(self) -> str:
+        """Returns the message shown in the speech band while there are no words (see `set_speech_status`)."""
+        return self._speech_status
+
+    def set_speech(self, transcript: Sequence[ballroom_scribe.models.TranscriptChunk]) -> None:
+        """Sets the transcript whose words are drawn along the bottom of the waveform.
+
+        Call it again whenever the transcript grows: when `transcript` begins with the chunks that were set before,
+        only the words of the new chunks are measured.
+
+        Args:
+            transcript: The transcript chunks of the displayed audio, in chronological order.
+        """
+        transcript = tuple(transcript)
+        has_grown = len(transcript) >= len(self._transcript) and all(
+            old is new for old, new in zip(self._transcript, transcript)
+        )
+        new_chunks = transcript[len(self._transcript) :] if has_grown else transcript
+        if has_grown and not new_chunks:
+            return
+        if not has_grown:
+            self._speech = ()
+            self._speech_widths.clear()
+        self._speech += tuple(word for chunk in new_chunks for word in chunk.words)
+        self._transcript = transcript
+        self._speech_markers_zoom = None
+        self.update()
+
+    def set_speech_status(self, message: str) -> None:
+        """Sets a one-line message that the speech band shows while there are no words, e.g. during transcription."""
+        if message != self._speech_status:
+            self._speech_status = message
+            self.update()
+
     def set_window_seconds(self, seconds: float) -> None:
         """Sets the visible span around the playhead, clamped to `[2 s, 1.1 × duration]`.
 
@@ -173,6 +326,12 @@ class WaveformWidget(QtWidgets.QWidget):
         self._position_seconds = 0.0
         self._markers = ()
         self._selected_rows = frozenset()
+        self._transcript = ()
+        self._speech = ()
+        self._speech_widths.clear()
+        self._speech_markers = ()
+        self._speech_markers_zoom = None
+        self._speech_status = ""
         self._pressing = False
         self._dragging = False
         self._playhead_offset_fraction = 0.0
@@ -315,6 +474,8 @@ class WaveformWidget(QtWidgets.QWidget):
         self._paint_out_of_bounds(painter, width, body_top, body_height, start_sec, end_sec)
         self._paint_ruler(painter, width, start_sec, end_sec)
         self._paint_waveform(painter, width, body_top, body_height, start_sec, end_sec)
+        self._paint_speech(painter, width, height, start_sec, end_sec)
+        # Event markers and the playhead are drawn over the speech band so that an inpoint can be lined up with a word.
         self._paint_markers(painter, width, body_top, body_height, start_sec, end_sec)
         self._paint_playhead(painter, width, height)
 
@@ -448,6 +609,86 @@ class WaveformWidget(QtWidgets.QWidget):
         ]
         painter.setPen(QtGui.QPen(QtGui.QColor(78, 168, 222), 1))
         painter.drawLines(lines)
+
+    def _speech_font(self) -> QtGui.QFont:
+        font = QtGui.QFont(self.font())
+        font.setPointSize(_SPEECH_FONT_POINT_SIZE)
+        return font
+
+    def _measure_speech(self) -> None:
+        """Measures the words of `speech` that have not been measured in the current font."""
+        font = self._speech_font()
+        if font.key() != self._speech_font_key:
+            self._speech_font_key = font.key()
+            self._speech_space_width = QtGui.QFontMetricsF(font).horizontalAdvance(" ")
+            self._speech_width_of_text.clear()
+            self._speech_widths.clear()
+            self._speech_markers_zoom = None
+        if len(self._speech_widths) == len(self._speech):
+            return
+        metrics = QtGui.QFontMetricsF(font)
+        for word in self._speech[len(self._speech_widths) :]:
+            width = self._speech_width_of_text.get(word.word)
+            if width is None:
+                width = metrics.horizontalAdvance(word.word)
+                self._speech_width_of_text[word.word] = width
+            self._speech_widths.append(width)
+
+    def _paint_speech(
+        self,
+        painter: QtGui.QPainter,
+        width: int,
+        height: int,
+        start_sec: float,
+        end_sec: float,
+    ) -> None:
+        """Draws the speech markers in a band one line of text high along the bottom of the waveform.
+
+        Each marker gets a tick at the time its first word is spoken and its words on a translucent background. A
+        label with less room than it needs is cut off with an ellipsis. While there are no words, the band shows the
+        speech status message instead.
+        """
+        if not self._speech and not self._speech_status:
+            return
+        font = self._speech_font()
+        painter.setFont(font)
+        metrics = QtGui.QFontMetrics(font)
+        band_height = metrics.height() + _SPEECH_BAND_PADDING
+        band_top = height - band_height
+        left_and_centered = QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+
+        if not self._speech:
+            status_rect = QtCore.QRect(6, band_top, max(0, width - 12), band_height)
+            painter.setPen(QtGui.QColor(135, 142, 156))
+            painter.drawText(
+                status_rect,
+                left_and_centered,
+                metrics.elidedText(self._speech_status, QtCore.Qt.TextElideMode.ElideRight, status_rect.width()),
+            )
+            return
+
+        markers = self.speech_markers
+        zoom = width / self._window_seconds
+        background = QtGui.QColor(24, 26, 31, 215)
+        text_color = QtGui.QColor(214, 224, 238)
+        tick_color = QtGui.QColor(150, 205, 240)
+        # The label of a marker that starts before the visible span may reach into it.
+        first = max(0, bisect.bisect_right(markers, start_sec, key=_start_seconds) - 1)
+        for index in range(first, len(markers)):
+            marker = markers[index]
+            if marker.start_seconds > end_sec:
+                break
+            x = round((marker.start_seconds - start_sec) * zoom)
+            room = marker.duration_seconds * zoom - _SPEECH_LABEL_PADDING
+            text = _fit_label(marker.words, room, width - x, metrics)
+            if text:
+                text_width = metrics.horizontalAdvance(text)
+                label = QtCore.QRect(x, band_top, text_width + 2 * _SPEECH_LABEL_MARGIN, band_height)
+                painter.fillRect(label, background)
+                painter.setPen(text_color)
+                painter.drawText(label.adjusted(_SPEECH_LABEL_MARGIN, 0, 0, 0), left_and_centered, text)
+            painter.setPen(tick_color)
+            painter.drawLine(x, band_top, x, height)
 
     def _paint_markers(
         self,

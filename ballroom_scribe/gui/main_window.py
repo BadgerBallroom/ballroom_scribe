@@ -1,8 +1,10 @@
 """Main window of the PySide6 Ballroom Scribe timestamp editor."""
 
+import collections
 import logging
 import pathlib
 import subprocess
+import sys
 from collections.abc import Callable, Sequence
 from typing import override
 
@@ -14,6 +16,7 @@ import ballroom_scribe.gui
 import ballroom_scribe.gui.models
 import ballroom_scribe.gui.utils
 import ballroom_scribe.models
+import ballroom_scribe.utils
 
 # Imported directly rather than as `ballroom_scribe.gui.models.RelinkPolicy`: `add_videos` needs it for a default
 # argument value while this module is being imported, and under `EAGER_IMPORT=1` that happens before
@@ -35,6 +38,20 @@ _DEFAULT_WINDOW_HEIGHT = 820
 # Initial video : table width ratio of the horizontal splitter.
 _CONTENT_SPLIT_RATIO = (1, 1)
 _SKIP_SECONDS = 10.0
+# The child process that transcribes the speech of the active video (see `run_transcription_worker`).
+_TRANSCRIPTION_COMMAND = (sys.executable, "-u", "-m", "ballroom_scribe.gui.run_transcription_worker")
+# Stepping through the rows of several videos must not start a worker for every video that is passed on the way.
+_TRANSCRIPTION_START_DELAY_MS = 1000
+# While a transcript arrives, the speech on screen is brought up to date at most four times a second.
+_SPEECH_REFRESH_INTERVAL_MS = 250
+_WORKER_EXIT_TIMEOUT_SECONDS = 5.0
+# How many of the worker's last lines of progress are logged when it fails.
+_WORKER_PROGRESS_LINES = 30
+_TRANSCRIBING_MESSAGE = "Transcribing speech…"
+_TRANSCRIPTION_FAILED_MESSAGE = (
+    "Transcribing speech failed (see the log) and is switched off. Tools → Transcribe Speech in Background switches"
+    " it back on."
+)
 
 
 def _quit_key_sequences() -> list[QtGui.QKeySequence]:
@@ -202,9 +219,31 @@ class _RemoveVideoCommand(QtGui.QUndoCommand):
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    """Top-level window coordinating video playback, waveform display, event table editing, and pipeline runs."""
+    """Top-level window coordinating video playback, waveform display, event table editing, and pipeline runs.
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    The window also shows what is said in the active video: as closed captions with the picture and as words along
+    the bottom of the waveform. It gets that speech from a child process, the transcription worker, which runs the
+    pipeline's stages through speech transcription on the active video and reports each stretch of speech as soon as
+    it is transcribed or read from the pipeline's cache. Only one worker runs at a time. It is killed when another
+    video, channel, or cache directory is chosen, and before a pipeline run starts, because the pipeline has to be
+    the only writer of the cache files (see `atomic_path`).
+    """
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        transcription_command: Sequence[str] = _TRANSCRIPTION_COMMAND,
+    ) -> None:
+        """Initializes the instance.
+
+        Args:
+            parent: The Qt parent widget.
+            transcription_command: The program that runs the transcription worker, followed by its leading
+                arguments. The window appends `-i VIDEO CHANNEL -c DIR` for the active video. The worker must print
+                one transcript chunk per line, as `run_transcription_worker` does, and exit with status `0` once
+                the transcript is complete.
+        """
         super().__init__(parent)
         app = QtGui.QGuiApplication.instance()
         if isinstance(app, QtGui.QGuiApplication) and app.windowIcon().isNull():
@@ -224,6 +263,35 @@ class MainWindow(QtWidgets.QMainWindow):
         # held. Qt keeps it pointing at the same event across insertions, removals, and moves. Clicks within this row
         # (e.g. double-clicking a cell to edit it) must not seek.
         self._visited_index = QtCore.QPersistentModelIndex()
+
+        self._transcription_command = tuple(transcription_command)
+        self._transcription_runner = ballroom_scribe.gui.PipelineRunner(self, merge_output=False)
+        # The complete transcripts of this session, so that going back to a video shows its speech at once.
+        self._transcripts: dict[
+            ballroom_scribe.gui.models.LoadedVideo, tuple[ballroom_scribe.models.TranscriptChunk, ...]
+        ] = {}
+        # The transcript on screen, which belongs to the active video and may still be incomplete.
+        self._shown_transcript: tuple[ballroom_scribe.models.TranscriptChunk, ...] = ()
+        # The video that the worker is transcribing, or `None` while no worker runs that the window still listens to,
+        # and the transcript chunks that this worker has delivered.
+        self._transcribing_video: ballroom_scribe.gui.models.LoadedVideo | None = None
+        self._arriving_transcript: list[ballroom_scribe.models.TranscriptChunk] = []
+        self._worker_progress: collections.deque[str] = collections.deque(maxlen=_WORKER_PROGRESS_LINES)
+        # Set from the moment a pipeline run starts until its dialog closes; no worker is started meanwhile.
+        self._yielding_to_pipeline = False
+        # Set once the window has been closed; a waveform that finishes loading afterwards must not start a worker.
+        self._closed = False
+        self._transcription_start_timer = QtCore.QTimer(self)
+        self._transcription_start_timer.setSingleShot(True)
+        self._transcription_start_timer.setInterval(_TRANSCRIPTION_START_DELAY_MS)
+        self._transcription_start_timer.timeout.connect(self._start_transcription)
+        self._speech_refresh_timer = QtCore.QTimer(self)
+        self._speech_refresh_timer.setSingleShot(True)
+        self._speech_refresh_timer.setInterval(_SPEECH_REFRESH_INTERVAL_MS)
+        self._speech_refresh_timer.timeout.connect(self._show_arriving_transcript)
+        self._transcription_label = QtWidgets.QLabel(self)
+        self._transcription_label.hide()
+        self.statusBar().addPermanentWidget(self._transcription_label)
 
         self._player = ballroom_scribe.gui.VideoPlayerWidget(self)
         self._waveform = ballroom_scribe.gui.WaveformWidget(self)
@@ -314,6 +382,21 @@ class MainWindow(QtWidgets.QMainWindow):
     def find_replace_bar(self) -> ballroom_scribe.gui.FindReplaceBar:
         """Returns the inline Find and Replace bar."""
         return self._find_replace_bar
+
+    @property
+    def transcribe_speech_action(self) -> QtGui.QAction:
+        """Returns the checkable action that switches transcribing speech in the background on and off."""
+        return self._transcribe_speech_action
+
+    @property
+    def is_transcribing(self) -> bool:
+        """Returns whether the transcription worker is running for the active video."""
+        return self._transcribing_video is not None
+
+    @property
+    def transcription_status(self) -> str:
+        """Returns the text at the right end of the status bar, which is empty unless the worker is running."""
+        return self._transcription_label.text()
 
     def add_videos(
         self,
@@ -462,7 +545,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._player.set_source(None)
         self._waveform.clear()
         self._session.clear()
-        self._active_video = None
+        self._set_active_video(None)
+        self._transcripts.clear()
         self._current_csv = None
         self._table_model.set_records(())
         self._rebuild_video_combo(select_csv_file=None)
@@ -690,12 +774,29 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self._table_model.reorder_rows(order, "Sort Rows by Inpoint"):
             self.statusBar().showMessage("Each video's rows are already in Inpoint order.", 4000)
 
+    def reload_transcript(self) -> None:
+        """Forgets the speech of the active video and starts the transcription worker for it again, without delay.
+
+        Speech that was transcribed before comes back from the pipeline's cache. Nothing is started while the active
+        video is offline, its waveform is not ready, or transcribing in the background is switched off.
+        """
+        if not isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo):
+            return
+        self._stop_transcription()
+        self._transcripts.pop(self._active_video, None)
+        self._shown_transcript = ()
+        self._show_speech()
+        self._start_transcription()
+
     @override
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if not self._confirm_discard_or_save():
             event.ignore()
             return
         self._player.pause()
+        # Kills the transcription worker and waits for it; otherwise it would go on transcribing without the editor.
+        self._closed = True
+        self._stop_transcription(wait=True)
         # Kills any in-flight `ffmpeg` and waits for its worker; otherwise Qt would block at exit until it finished.
         self._waveform_loader.shutdown()
         super().closeEvent(event)
@@ -927,6 +1028,15 @@ class MainWindow(QtWidgets.QMainWindow):
         _with_shortcut_hint(self._run_pipeline_action, "Run find_timestamps.py on the loaded video(s)")
         self._run_pipeline_action.triggered.connect(self._open_pipeline_dialog)
 
+        self._transcribe_speech_action = QtGui.QAction("Transcribe Speech in Background", self)
+        self._transcribe_speech_action.setCheckable(True)
+        self._transcribe_speech_action.setChecked(True)
+        _with_shortcut_hint(
+            self._transcribe_speech_action,
+            "Transcribe the speech of the active video while you work, to show it as captions and along the waveform",
+        )
+        self._transcribe_speech_action.toggled.connect(self._on_transcribe_speech_toggled)
+
         self._manage_videos_action = QtGui.QAction("Manage Videos…", self)
         _with_shortcut_hint(
             self._manage_videos_action,
@@ -985,10 +1095,13 @@ class MainWindow(QtWidgets.QMainWindow):
         view_menu.addAction(self._zoom_in_action)
         view_menu.addAction(self._zoom_out_action)
         view_menu.addAction(self._reset_zoom_action)
+        view_menu.addSeparator()
+        view_menu.addAction(self._player.captions_action)
 
         tools_menu = self.menuBar().addMenu("&Tools")
         tools_menu.addAction(self._manage_videos_action)
         tools_menu.addAction(self._run_pipeline_action)
+        tools_menu.addAction(self._transcribe_speech_action)
         tools_menu.addSeparator()
         repair_menu = tools_menu.addMenu("Repair")
         repair_menu.addAction(self._group_rows_action)
@@ -1025,6 +1138,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._bind_global_key(",", lambda: self._step_playhead(-0.1))
         self._bind_global_key(".", lambda: self._step_playhead(0.1))
         self._bind_global_key("I", self.set_selected_inpoint_to_playhead)
+        self._bind_global_key("C", self._player.toggle_captions)
 
         insert_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Insert"), self._table_view)
         insert_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
@@ -1063,6 +1177,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._waveform_loader.loaded.connect(self._on_waveform_loaded)
         self._waveform_loader.failed.connect(self._on_waveform_failed)
+
+        self._transcription_runner.output.connect(self._on_transcript_chunk_arrived)
+        self._transcription_runner.error_output.connect(self._on_worker_progress)
+        self._transcription_runner.finished.connect(self._on_transcription_finished)
 
         selection_model = self._table_view.selectionModel()
         selection_model.currentRowChanged.connect(self._on_current_row_changed)
@@ -1139,7 +1257,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError as err:
             QtWidgets.QMessageBox.warning(self, "Invalid Cache Directory", str(err))
             return
-        self._active_video = updated
+        self._set_active_video(updated)
         self._start_waveform_load(updated)
         self.statusBar().showMessage(f"Cache directory set to {updated.cache_dir}", 5000)
 
@@ -1322,7 +1440,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 if target is not None and target != self._active_video:
                     self._activate_video(target)
         else:
-            self._active_video = None
+            self._set_active_video(None)
             self._channel_spin.setEnabled(False)
 
     def _select_combo_entry(self, csv_file: pathlib.Path) -> None:
@@ -1339,6 +1457,22 @@ class MainWindow(QtWidgets.QMainWindow):
         finally:
             self._updating_selector = False
 
+    def _set_active_video(self, video: ballroom_scribe.gui.models.SessionVideo | None) -> None:
+        """Records `video` as the active video and replaces the speech on screen with what is known of its own.
+
+        A video with another audio channel or cache directory counts as another video. The worker that was
+        transcribing the previous video is killed; what it finished stays in the pipeline's cache.
+        """
+        if video == self._active_video:
+            return
+        self._active_video = video
+        self._stop_transcription()
+        if isinstance(video, ballroom_scribe.gui.models.LoadedVideo):
+            self._shown_transcript = self._transcripts.get(video, ())
+        else:
+            self._shown_transcript = ()
+        self._show_speech()
+
     def _activate_video(
         self,
         video: ballroom_scribe.gui.models.SessionVideo,
@@ -1346,7 +1480,7 @@ class MainWindow(QtWidgets.QMainWindow):
         initial_seconds: float | None = None,
         preserve_playing: bool = False,
     ) -> None:
-        self._active_video = video
+        self._set_active_video(video)
 
         self._channel_spin.blockSignals(True)
         if isinstance(video, ballroom_scribe.gui.models.OfflineVideo):
@@ -1369,6 +1503,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 preserve_playing=preserve_playing,
             )
             self._start_waveform_load(video)
+        # Loading a source removed the player's captions.
+        self._show_speech()
         self._refresh_waveform_markers()
         self._update_action_states()
 
@@ -1377,7 +1513,7 @@ class MainWindow(QtWidgets.QMainWindow):
         was_active = self._active_video is not None and self._active_video.csv_file == old_key
         self._session.replace(old_key, entry)
         if was_active:
-            self._active_video = None  # Makes `_rebuild_video_combo` activate the swapped-in entry.
+            self._set_active_video(None)  # Makes `_rebuild_video_combo` activate the swapped-in entry.
             select = entry.csv_file
         else:
             select = self._active_video.csv_file if self._active_video is not None else entry.csv_file
@@ -1400,7 +1536,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._session.remove(csv_file)
         if was_active:
             self._waveform_loader.cancel()
-            self._active_video = None
+            self._set_active_video(None)
             if not self._session:
                 self._player.set_source(None)
                 self._waveform.clear()
@@ -1466,7 +1602,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ):
             return
         updated = self._session.set_channel(self._active_video.csv_file, channel)
-        self._active_video = updated
+        self._set_active_video(updated)
         self._start_waveform_load(updated)
 
     def _on_waveform_loaded(
@@ -1480,6 +1616,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 f"Waveform ready ({video.input_video.name}, channel {video.input_channel})",
                 4000,
             )
+            # The audio is extracted now, so the worker can no longer get in the way of the waveform loader.
+            self._schedule_transcription()
 
     def _on_waveform_failed(
         self,
@@ -1670,14 +1808,22 @@ class MainWindow(QtWidgets.QMainWindow):
             has_unsaved_edits=not self._table_model.undo_stack.isClean(),
             parent=self,
         )
-        dialog.pipeline_starting.connect(self._yield_extraction_to_pipeline)
+        dialog.pipeline_starting.connect(self._yield_to_pipeline)
         dialog.pipeline_succeeded.connect(self._on_pipeline_succeeded)
         dialog.exec()
+        self._yielding_to_pipeline = False
         # Covers a failed or cancelled run (or none at all): the GUI extracts the audio itself again.
         self._reload_waveform_if_missing()
+        # If a run killed the worker, a new one carries on from what is in the cache by now.
+        self._schedule_transcription()
 
-    def _yield_extraction_to_pipeline(self) -> None:
-        """Stops the GUI's extraction so the pipeline is the only writer of the cache files (see `atomic_path`)."""
+    def _yield_to_pipeline(self) -> None:
+        """Stops the GUI's extraction and transcription so the pipeline is the only writer of the cache files.
+
+        See `atomic_path`. The speech on screen stays, and no worker is started until the pipeline's dialog closes.
+        """
+        self._yielding_to_pipeline = True
+        self._stop_transcription(wait=True)
         self._waveform_loader.shutdown()
         if isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) and self._waveform.envelope is None:
             name = self._active_video.input_video.name
@@ -1693,6 +1839,159 @@ class MainWindow(QtWidgets.QMainWindow):
     def _reload_waveform_if_missing(self) -> None:
         if isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) and self._waveform.envelope is None:
             self._start_waveform_load(self._active_video)
+
+    def _needs_transcription(self) -> bool:
+        """Returns whether a worker should be started for the active video now.
+
+        The worker extracts the video's audio if the cache lacks it, as the waveform loader does, and the two must not
+        write that file at once. The waveform being ready means that the audio has been extracted.
+        """
+        video = self._active_video
+        return (
+            self._transcribe_speech_action.isChecked()
+            and not self._yielding_to_pipeline
+            and not self._closed
+            and isinstance(video, ballroom_scribe.gui.models.LoadedVideo)
+            and video not in self._transcripts
+            and video != self._transcribing_video
+            and self._waveform.envelope is not None
+        )
+
+    def _schedule_transcription(self) -> None:
+        """Starts the worker for the active video in a moment, if its speech still has to be transcribed."""
+        if self._needs_transcription():
+            self._transcription_start_timer.start()
+
+    def _start_transcription(self) -> None:
+        """Starts the worker for the active video, if its speech still has to be transcribed."""
+        video = self._active_video
+        if not self._needs_transcription() or not isinstance(video, ballroom_scribe.gui.models.LoadedVideo):
+            return
+        # A worker that was killed a moment ago may not have exited yet, and only one can run at a time.
+        if not self._transcription_runner.shutdown(_WORKER_EXIT_TIMEOUT_SECONDS):
+            _LOGGER.warning("The previous transcription worker has not exited; trying again in a moment.")
+            self._transcription_start_timer.start()
+            return
+        self._transcribing_video = video
+        self._arriving_transcript = []
+        self._worker_progress.clear()
+        _LOGGER.info("Transcribing the speech of %s (channel %d)", video.input_video, video.input_channel)
+        self._transcription_runner.start_transcription(
+            ballroom_scribe.cli.arguments.InputCacheArgs(
+                input_video=video.input_video,
+                input_channel=video.input_channel,
+                parent_cache_dir=video.parent_cache_dir,
+            ),
+            self._transcription_command,
+        )
+        self._update_transcription_status()
+
+    def _stop_transcription(self, *, wait: bool = False) -> None:
+        """Kills the worker, if it is running, and forgets what it was delivering; the speech on screen stays.
+
+        Args:
+            wait: Whether to wait until the worker has exited, which is needed before anything else may write the
+                cache files.
+        """
+        self._transcription_start_timer.stop()
+        self._speech_refresh_timer.stop()
+        # Cleared before the worker is killed: its remaining output and its exit are ignored from here on.
+        self._transcribing_video = None
+        self._arriving_transcript = []
+        if wait:
+            self._transcription_runner.shutdown(_WORKER_EXIT_TIMEOUT_SECONDS)
+        else:
+            self._transcription_runner.cancel()
+        self._update_transcription_status()
+
+    def _on_transcribe_speech_toggled(self, checked: bool) -> None:
+        if checked:
+            if self.statusBar().currentMessage() == _TRANSCRIPTION_FAILED_MESSAGE:
+                self.statusBar().clearMessage()
+            self._schedule_transcription()
+        else:
+            self._stop_transcription()
+
+    def _on_transcript_chunk_arrived(self, line: str) -> None:
+        """Takes in one line of the worker's standard output, which holds one transcript chunk."""
+        if self._transcribing_video is None:
+            return
+        try:
+            transcript_chunk = ballroom_scribe.gui.utils.decode_transcript_chunk(line)
+        except ValueError:
+            _LOGGER.warning("Ignoring unexpected output of the transcription worker: %.200s", line)
+            return
+        self._arriving_transcript.append(transcript_chunk)
+        if not self._speech_refresh_timer.isActive():
+            self._speech_refresh_timer.start()
+
+    def _on_worker_progress(self, text: str) -> None:
+        """Keeps the worker's latest progress text, which explains a failure."""
+        if self._transcribing_video is None:
+            return
+        for line in text.splitlines():
+            if line.strip():
+                self._worker_progress.append(line)
+                _LOGGER.debug("Transcription worker: %s", line)
+
+    def _on_transcription_finished(self, exit_code: int) -> None:
+        video = self._transcribing_video
+        if video is None:
+            return  # The worker was killed on purpose.
+        self._transcribing_video = None
+        self._speech_refresh_timer.stop()
+        transcript = tuple(self._arriving_transcript)
+        self._arriving_transcript = []
+        if exit_code == 0:
+            self._transcripts[video] = transcript
+            self._shown_transcript = transcript
+            _LOGGER.info(
+                "Transcribed %d stretch(es) of speech in %s (channel %d)",
+                len(transcript),
+                video.input_video,
+                video.input_channel,
+            )
+        else:
+            if transcript:
+                self._shown_transcript = transcript
+            _LOGGER.warning(
+                "The transcription worker for %s (channel %d) failed with exit status %d. Its last output:\n%s",
+                video.input_video,
+                video.input_channel,
+                exit_code,
+                "\n".join(self._worker_progress),
+            )
+            self.statusBar().showMessage(_TRANSCRIPTION_FAILED_MESSAGE, 15000)
+            self._transcribe_speech_action.setChecked(False)
+        self._show_speech()
+        self._update_transcription_status()
+
+    def _show_arriving_transcript(self) -> None:
+        """Brings the speech on screen up to date with what the worker has delivered."""
+        self._shown_transcript = tuple(self._arriving_transcript)
+        self._show_speech()
+        self._update_transcription_status()
+
+    def _show_speech(self) -> None:
+        """Shows the transcript of the active video as words along the waveform and as captions with the video."""
+        self._waveform.set_speech(self._shown_transcript)
+        self._player.set_captions(ballroom_scribe.gui.utils.group_words_into_captions(self._shown_transcript))
+
+    def _update_transcription_status(self) -> None:
+        """Says in the status bar and in the waveform's speech band whether the worker is running."""
+        if self._transcribing_video is None:
+            self._transcription_label.clear()
+            self._transcription_label.hide()
+            self._waveform.set_speech_status("")
+            return
+        status = _TRANSCRIBING_MESSAGE
+        if self._arriving_transcript:
+            # How far into the video the transcript reaches, in whole seconds.
+            reached = ballroom_scribe.utils.format_duration(self._arriving_transcript[-1].end_seconds)
+            status = f"{status} {reached.partition('.')[0]}"
+        self._transcription_label.setText(status)
+        self._transcription_label.show()
+        self._waveform.set_speech_status(_TRANSCRIBING_MESSAGE)
 
     def _refresh_waveform_markers(self) -> None:
         if self._active_video is None:
