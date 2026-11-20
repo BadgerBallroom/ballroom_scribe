@@ -1,6 +1,8 @@
 import concurrent.futures
+import io
 import pathlib
 import subprocess
+import sys
 import threading
 import unittest
 from unittest.mock import ANY, MagicMock, patch
@@ -17,6 +19,7 @@ class TestExtractAudio(unittest.TestCase):
     """Tests for the `extract_audio` function."""
 
     def setUp(self):
+        self.mock_stderr = self.enterContext(patch.object(sys, "stderr", new_callable=io.StringIO))
         self.mock_popen_cls = self.enterContext(patch.object(subprocess, "Popen", autospec=True))
         self.mock_popen_cls.return_value.__exit__.return_value = False  # never swallow exceptions
         self.mock_process = self.mock_popen_cls.return_value.__enter__.return_value
@@ -60,6 +63,7 @@ class TestExtractAudio(unittest.TestCase):
         self.mock_validate_input_channel.assert_not_called()
         self.mock_atomic_path.assert_not_called()
         self.mock_popen_cls.assert_not_called()
+        self.assertEqual(self.mock_stderr.getvalue(), "")
 
     def test_runs_ffmpeg_when_output_file_does_not_exist(self):
         """Should invoke FFmpeg with exact arguments to write the audio atomically when output file is missing."""
@@ -72,6 +76,7 @@ class TestExtractAudio(unittest.TestCase):
         self.mock_popen_cls.assert_called_once_with(self._expected_command())
         self.mock_process.wait.assert_called_once_with(timeout=None)
         self.mock_process.kill.assert_not_called()
+        self.assertEqual(self.mock_stderr.getvalue(), "FFmpeg exited normally (status 0).\n")
 
     def test_polls_for_cancellation_when_event_is_given(self):
         """Should wait in short intervals so a cancellation request is noticed promptly."""
@@ -85,30 +90,41 @@ class TestExtractAudio(unittest.TestCase):
         self.assertGreater(poll_timeout, 0.0)
         self.assertLessEqual(poll_timeout, 1.0)
         self.mock_process.kill.assert_not_called()
+        self.assertEqual(self.mock_stderr.getvalue(), "FFmpeg exited normally (status 0).\n")
 
     def test_kills_ffmpeg_and_raises_when_cancelled(self):
-        """Should kill FFmpeg, let `atomic_path` discard the partial file, and raise `CancelledError`."""
+        """Should kill FFmpeg, print interrupted status after reaping, discard partial file, and raise CancelledError."""
         cancel = threading.Event()
         cancel.set()
         self.mock_process.wait.side_effect = subprocess.TimeoutExpired(cmd="ffmpeg", timeout=0.1)
+        stderr_during_reap: list[str] = []
+
+        def record_stderr_on_exit(*_args):
+            stderr_during_reap.append(self.mock_stderr.getvalue())
+            return False
+
+        self.mock_popen_cls.return_value.__exit__.side_effect = record_stderr_on_exit
 
         with self.assertRaises(concurrent.futures.CancelledError):
             ballroom_scribe.utils.extract_audio(_INPUT_VIDEO, 1, _CACHE_DIR, cancel=cancel)
 
         self.mock_process.kill.assert_called_once_with()
         self.mock_atomic_path.return_value.__exit__.assert_called_once_with(concurrent.futures.CancelledError, ANY, ANY)
+        self.assertEqual(stderr_during_reap, [""])
+        self.assertEqual(self.mock_stderr.getvalue(), "\nFFmpeg interrupted.\n")
 
     def test_kills_ffmpeg_when_interrupted(self):
-        """Should kill FFmpeg if waiting is interrupted (e.g., by Ctrl+C) and re-raise."""
+        """Should kill FFmpeg, print interrupted status, and re-raise if waiting is interrupted (e.g., by Ctrl+C)."""
         self.mock_process.wait.side_effect = KeyboardInterrupt()
 
         with self.assertRaises(KeyboardInterrupt):
             ballroom_scribe.utils.extract_audio(_INPUT_VIDEO, 1, _CACHE_DIR)
 
         self.mock_process.kill.assert_called_once_with()
+        self.assertEqual(self.mock_stderr.getvalue(), "\nFFmpeg interrupted.\n")
 
     def test_propagates_ffmpeg_failure(self):
-        """Should raise CalledProcessError if FFmpeg exits with a non-zero status, letting the atomic path clean up."""
+        """Should print error status and raise CalledProcessError if FFmpeg exits with a non-zero status."""
         self.mock_process.returncode = 1
 
         with self.assertRaises(subprocess.CalledProcessError) as context:
@@ -117,6 +133,7 @@ class TestExtractAudio(unittest.TestCase):
         self.assertEqual(context.exception.returncode, 1)
         self.assertEqual(context.exception.cmd, self._expected_command())
         self.mock_atomic_path.return_value.__exit__.assert_called_once_with(subprocess.CalledProcessError, ANY, ANY)
+        self.assertEqual(self.mock_stderr.getvalue(), "FFmpeg exited with error (status 1).\n")
 
     def test_propagates_invalid_channel(self):
         """Should not run FFmpeg if `validate_input_channel` rejects the channel."""
@@ -127,6 +144,17 @@ class TestExtractAudio(unittest.TestCase):
 
         self.mock_atomic_path.assert_not_called()
         self.mock_popen_cls.assert_not_called()
+        self.assertEqual(self.mock_stderr.getvalue(), "")
+
+    def test_propagates_popen_launch_error_without_interrupted_message(self):
+        """Should not print an FFmpeg exit or interruption message if `Popen` fails before starting FFmpeg."""
+        self.mock_popen_cls.side_effect = FileNotFoundError("ffmpeg not found")
+
+        with self.assertRaises(FileNotFoundError):
+            ballroom_scribe.utils.extract_audio(_INPUT_VIDEO, 1, _CACHE_DIR)
+
+        self.mock_atomic_path.return_value.__exit__.assert_called_once_with(FileNotFoundError, ANY, ANY)
+        self.assertEqual(self.mock_stderr.getvalue(), "")
 
 
 if __name__ == "__main__":

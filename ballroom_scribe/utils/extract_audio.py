@@ -3,6 +3,7 @@
 import concurrent.futures
 import pathlib
 import subprocess
+import sys
 import threading
 
 import ballroom_scribe
@@ -32,28 +33,43 @@ def _ffmpeg_command(input_video: pathlib.Path, input_channel: int, output_audio:
     ]
 
 
-def _run_until_done(command: list[str], cancel: threading.Event | None) -> None:
-    """Runs `command` to completion like `subprocess.run(check=True)`, killing it if `cancel` is set meanwhile.
+def _wait_for_process(process: subprocess.Popen[bytes], cancel: threading.Event | None) -> None:
+    """Waits for `process` to exit, polling `cancel` when given and raising `CancelledError` once it is set."""
+    while True:
+        try:
+            process.wait(timeout=None if cancel is None else _CANCEL_POLL_SECONDS)
+            return
+        except subprocess.TimeoutExpired:
+            if cancel is not None and cancel.is_set():
+                raise concurrent.futures.CancelledError("Audio extraction was canceled.") from None
+
+
+def _run_ffmpeg(command: list[str], cancel: threading.Event | None) -> None:
+    """Runs the `ffmpeg` `command` to completion, killing it on interruption and reporting how it exited.
 
     Raises:
-        concurrent.futures.CancelledError: If `cancel` was set before the command finished.
-        subprocess.CalledProcessError: If the command exited with a non-zero status.
+        concurrent.futures.CancelledError: If `cancel` was set before `ffmpeg` finished.
+        subprocess.CalledProcessError: If `ffmpeg` exited with a non-zero status.
     """
-    with subprocess.Popen(command) as process:
-        try:
-            while True:
-                try:
-                    process.wait(timeout=None if cancel is None else _CANCEL_POLL_SECONDS)
-                    break
-                except subprocess.TimeoutExpired:
-                    if cancel is not None and cancel.is_set():
-                        raise concurrent.futures.CancelledError("Audio extraction was canceled.") from None
-        except BaseException:
-            # Also covers `KeyboardInterrupt`, so Ctrl+C in the CLI never leaves `ffmpeg` running.
-            process.kill()
-            raise
+    interrupted = False
+    try:
+        with subprocess.Popen(command) as process:
+            try:
+                _wait_for_process(process, cancel)
+            except BaseException:
+                # Also covers `KeyboardInterrupt`, so Ctrl+C in the CLI never leaves `ffmpeg` running.
+                interrupted = True
+                process.kill()
+                raise
+    finally:
+        if interrupted:
+            # Leading newline keeps any `\r`-terminated FFmpeg progress line intact rather than overwriting it.
+            print("\nFFmpeg interrupted.", file=sys.stderr, flush=True)
+
     if process.returncode != 0:
+        print(f"FFmpeg exited with error (status {process.returncode}).", file=sys.stderr, flush=True)
         raise subprocess.CalledProcessError(process.returncode, command)
+    print(f"FFmpeg exited normally (status {process.returncode}).", file=sys.stderr, flush=True)
 
 
 def extract_audio(
@@ -91,5 +107,5 @@ def extract_audio(
 
     ballroom_scribe.utils.validate_input_channel(input_video=input_video, input_channel=input_channel)
     with ballroom_scribe.utils.atomic_path(output_audio) as partial_audio:
-        _run_until_done(_ffmpeg_command(input_video, input_channel, partial_audio), cancel)
+        _run_ffmpeg(_ffmpeg_command(input_video, input_channel, partial_audio), cancel)
     return output_audio
