@@ -1,3 +1,4 @@
+from .append_console_output import append_console_output
 from .comment_icon import comment_icon
 from .compute_waveform_envelope import compute_waveform_envelope
 from .configure_logging import configure_logging
@@ -16,6 +17,7 @@ from .paint_frame import paint_frame
 from .sort_rows_by_inpoint import sort_rows_by_inpoint
 
 __all__ = [
+    "append_console_output",
     "comment_icon",
     "compute_waveform_envelope",
     "configure_logging",

@@ -9,6 +9,7 @@ from PySide6 import QtCore, QtGui, QtWidgets
 
 import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
+import ballroom_scribe.gui.utils
 
 
 class PipelineDialog(QtWidgets.QDialog):
@@ -32,6 +33,7 @@ class PipelineDialog(QtWidgets.QDialog):
         self._inputs = list(inputs)
         self._has_unsaved_edits = has_unsaved_edits
         self._target_csv: pathlib.Path | None = None
+        self._overwrite_log_line = False
         self._runner = ballroom_scribe.gui.PipelineRunner(self)
         self._runner.output.connect(self._append_log)
         self._runner.finished.connect(self._on_runner_finished)
@@ -76,6 +78,7 @@ class PipelineDialog(QtWidgets.QDialog):
 
         self._log_view = QtWidgets.QPlainTextEdit(self)
         self._log_view.setReadOnly(True)
+        self._log_view.setUndoRedoEnabled(False)
         mono_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         self._log_view.setFont(mono_font)
 
@@ -166,6 +169,7 @@ class PipelineDialog(QtWidgets.QDialog):
 
         self._target_csv = output_csv
         self._log_view.clear()
+        self._overwrite_log_line = False
         self._set_running_ui(True)
         # Lets the main window stop its own audio extraction so the pipeline is the only writer of the cache.
         self.pipeline_starting.emit()
@@ -176,9 +180,13 @@ class PipelineDialog(QtWidgets.QDialog):
         self._runner.cancel()
 
     def _append_log(self, text: str) -> None:
+        self._overwrite_log_line = ballroom_scribe.gui.utils.append_console_output(
+            self._log_view.document(),
+            text,
+            overwrite_line=self._overwrite_log_line,
+        )
         cursor = self._log_view.textCursor()
         cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
-        cursor.insertText(text)
         self._log_view.setTextCursor(cursor)
         self._log_view.ensureCursorVisible()
 
