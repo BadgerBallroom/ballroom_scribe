@@ -14,6 +14,7 @@ from .pipeline_runner import PipelineRunner
 from .problem_report_dialog import ProblemReportDialog
 from .run_editor import run_editor
 from .run_transcription_worker import run_transcription_worker
+from .supervise_editor import supervise_editor
 from .unhandled_exception_reporter import UnhandledExceptionReporter
 from .video_player_widget import VideoPlayerWidget
 from .video_session import VideoSession
@@ -42,4 +43,5 @@ __all__ = [
     "parse_editor_args",
     "run_editor",
     "run_transcription_worker",
+    "supervise_editor",
 ]

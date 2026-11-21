@@ -11,9 +11,12 @@ _REPORT_NAME_FORMAT = "Ballroom Scribe problem report %Y-%m-%d %H-%M-%S.txt"
 
 
 def _read_logs(session_logs: ballroom_scribe.gui.models.SessionLogs) -> dict[str, str]:
-    """Returns the text of each log that the session has so far, by the name of its file."""
+    """Returns the text of each log that the session has so far, by the name of its file.
+
+    The console log exists only when the editor runs under its supervisor.
+    """
     logs: dict[str, str] = {}
-    for log_file in (session_logs.editor_log,):
+    for log_file in (session_logs.editor_log, session_logs.console_log):
         try:
             # A process that crashed may have written bytes that are not UTF-8; they must not cost the report.
             logs[log_file.name] = log_file.read_text(encoding="utf-8", errors="replace")

@@ -1,9 +1,11 @@
 """The process of the timestamp editor: sets up its logs and runs the main window until it is closed.
 
-`edit_timestamps.py` is what users run. To run the editor from this module instead, run
-`python -m ballroom_scribe.gui.run_editor` in the folder that contains `edit_timestamps.py`.
+`edit_timestamps.py` is what users run. It starts this module as a child process and supervises it (see
+`supervise_editor`). To run the editor without its supervisor, run `python -m ballroom_scribe.gui.run_editor` in the
+folder that contains `edit_timestamps.py`.
 """
 
+import contextlib
 import faulthandler
 import logging
 import sys
@@ -61,6 +63,11 @@ def run_editor(argv: Sequence[str] | None = None) -> int:
         window.open_csv(cli_args["csv"])
     exit_status = app.exec()
     watchdog.stop()
+    if exit_status == 0:
+        # Tells the supervisor that the window was closed in good order: if the process dies after this, while Qt
+        # and Python shut down, the user has lost nothing and is not bothered with a report.
+        with contextlib.suppress(OSError):
+            session_logs.closed_normally_marker.touch()
     return exit_status
 
 

@@ -58,6 +58,7 @@ class TestRunEditor(unittest.TestCase):
         self.mock_exception_reporter.exception_reported = MagicMock()
         self.mock_watchdog_cls = self.enterContext(patch.object(ballroom_scribe.gui, "FreezeWatchdog", autospec=True))
         self.mock_watchdog = self.mock_watchdog_cls.return_value
+        self.mock_touch = self.enterContext(patch.object(pathlib.Path, "touch", autospec=True))
 
     def _set_arguments(
         self,
@@ -159,6 +160,28 @@ class TestRunEditor(unittest.TestCase):
         self.mock_app.exec.return_value = 3
 
         self.assertEqual(ballroom_scribe.gui.run_editor([]), 3)
+
+    def test_tells_the_supervisor_that_the_window_was_closed_in_good_order(self):
+        manager = MagicMock()
+        manager.attach_mock(self.mock_app, "app")
+        manager.attach_mock(self.mock_touch, "touch")
+
+        ballroom_scribe.gui.run_editor([])
+
+        # Only once the event loop has ended: a process that dies after this has cost the user nothing.
+        self.assertEqual(manager.mock_calls, [call.app.exec(), call.touch(_SESSION_LOGS.closed_normally_marker)])
+
+    def test_does_not_say_so_when_the_event_loop_ended_with_an_error(self):
+        self.mock_app.exec.return_value = 3
+
+        ballroom_scribe.gui.run_editor([])
+
+        self.mock_touch.assert_not_called()
+
+    def test_exits_normally_even_if_it_cannot_tell_the_supervisor(self):
+        self.mock_touch.side_effect = PermissionError("The folder of the session is read-only")
+
+        self.assertEqual(ballroom_scribe.gui.run_editor([]), 0)
 
 
 if __name__ == "__main__":

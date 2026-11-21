@@ -233,6 +233,9 @@ On Windows, you can launch with `pythonw edit_timestamps.py` to avoid opening a 
 output is still captured inside the in-app **Auto-Find Events** dialog). Add `-v` / `--verbose` to print debug logging,
 including Qt multimedia backend diagnostics, to the console.
 
+`edit_timestamps.py` runs the editor in a second Python process and watches over it, so that it can offer to
+[report the problem](#reporting-a-problem) if the editor crashes.
+
 ### Editor Features
 
 *   **Synchronized video and waveform**: Displays an audio waveform with click-to-seek, drag-to-pan (the audio follows
@@ -333,9 +336,12 @@ the rules enabled by `--verbose`.
 
 ### Reporting a Problem
 
-If the editor crashes, freezes, or fails to find events, choose **Help → Report a Problem…**. It saves a report file
-and opens a GitHub issue with the details filled in. Attach the report file to the issue, or send the file to the
-maintainer. The editor offers the same when it notices a failure itself.
+If the editor closes unexpectedly, a dialog offers to report the problem: it has saved a report file, and it opens a
+GitHub issue with the details filled in. Attach the report file to the issue, or send the file to the maintainer. The
+editor offers the same when it notices a failure while it runs, and **Help → Report a Problem…** does so at any time.
+
+If the editor has not responded for 15 seconds or more, end it from the Task Manager (Force Quit on macOS). The report
+then shows where the editor was stuck.
 
 The report file holds what the editor logged, so it contains file names and folder paths from your computer and may
 contain speech transcribed from your videos. Look through it before you share it. **Help → Open Log Folder** shows
@@ -351,14 +357,15 @@ python smoke_test_editor.py --windowed   # watch it run in a real window (also c
 python smoke_test_editor.py --verbose    # include Qt multimedia diagnostics
 ```
 
-It prints a work directory containing the clip, CSVs, caches, and `editor_screenshot.png`, and exits non-zero with a
-`SMOKE TEST FAILED: ...` message on the first failed expectation. In headless mode, the screenshot's video area is blank
-because the native video surface cannot be captured offscreen; frame rendering is verified through the video sink
-instead.
+It prints a work directory containing the clip, CSVs, caches, logs, and `editor_screenshot.png`, and exits non-zero
+with a `SMOKE TEST FAILED: ...` message on the first failed expectation. In headless mode, the screenshot's video area
+is blank because the native video surface cannot be captured offscreen; frame rendering is verified through the video
+sink instead.
 
 The test never runs the pipeline's models. A stand-in for the transcription process delivers a short transcript, which
 the test follows into the captions and the waveform. Captions on the picture are verified through the video sink, and
-with `--windowed` also in a grab of the screen.
+with `--windowed` also in a grab of the screen. Reporting problems is tested without opening a browser or a file
+manager: with a pipeline run that rejects its arguments, and with a stand-in for an editor that crashes.
 
 ## Tuning PANN Thresholds
 

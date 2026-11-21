@@ -19,6 +19,7 @@ import os
 import pathlib
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,47 @@ _UNHANDLED_ERROR = "The smoke test raised this on purpose"
 # `find_timestamps.py` rejects this flag before it does anything, so the pipeline's models are never run.
 _REJECTED_PIPELINE_FLAG = "--no-such-flag"
 _PIPELINE_TIMEOUT_SECONDS = 60.0
+_EDITOR_SCRIPT_NAME = "smoke_editor.py"
+_EDITOR_SCRIPT = '''"""Stand-in for the editor's process, written by `smoke_test_editor.py`.
+
+Writes to its console in the ways that the editor and its libraries do and then ends as the smoke test's plan says,
+so that the editor's supervisor can be tested without an editor that really crashes.
+"""
+
+import json
+import os
+import pathlib
+import sys
+
+plan = json.loads(pathlib.Path(__file__).with_suffix(".json").read_text(encoding="utf-8"))
+print("Arguments:", sys.argv[1:])
+print("Session:", os.environ.get(plan["session_variable"]))
+print("A line on standard error, as from logging", file=sys.stderr)
+os.write(2, "Bytes on file descriptor 2, as from Qt or FFmpeg\\n".encode())
+if plan["closed_normally_marker"]:
+    pathlib.Path(plan["closed_normally_marker"]).touch()
+if plan["signal"]:
+    os.kill(os.getpid(), plan["signal"])
+sys.exit(plan["exit_status"])
+'''
+# Runs the editor's supervisor in a process of its own, as `edit_timestamps.py` does, and says what it did.
+_SUPERVISOR_PROBE = """
+import pathlib
+import sys
+
+import ballroom_scribe.gui
+import ballroom_scribe.gui.models
+
+reported = []
+status = ballroom_scribe.gui.supervise_editor(
+    [],
+    session_logs=ballroom_scribe.gui.models.SessionLogs(pathlib.Path(sys.argv[1])),
+    editor_command=(sys.executable, "-u", sys.argv[2]),
+    on_crash=lambda _session_logs, summary: reported.append(summary),
+)
+print(f"status={status} reported={reported} qt_loaded={'PySide6' in sys.modules}")
+"""
+_SUPERVISOR_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPTION_TIMEOUT_SECONDS = 30.0
 _SPEECH_CHUNK_DELAY_SECONDS = 0.6
 _SPEECH_SAMPLE_RATE = 32_000
@@ -4021,6 +4063,153 @@ def _check_failed_pipeline(fixture: _Fixture) -> None:
     _expect(window.table_model.undo_stack.isClean(), "A failed pipeline run modified the document")
 
 
+def _leave_editor_plan(
+    work_dir: pathlib.Path,
+    name: str,
+    *,
+    exit_status: int = 0,
+    signal_number: int = 0,
+    closes_normally: bool = False,
+) -> ballroom_scribe.gui.models.SessionLogs:
+    """Leaves what the stand-in editor does when it is run next, and returns where that session keeps its logs.
+
+    The stand-in writes to its console, says that its window was closed in good order if `closes_normally`, and then
+    ends: by `signal_number` if that is given, and with `exit_status` otherwise.
+    """
+    session_logs = ballroom_scribe.gui.models.SessionLogs(work_dir / f"supervised_{name}")
+    if session_logs.directory.exists():
+        shutil.rmtree(session_logs.directory)
+    plan = {
+        "session_variable": ballroom_scribe.gui.models.SessionLogs.ENVIRONMENT_VARIABLE,
+        "closed_normally_marker": str(session_logs.closed_normally_marker) if closes_normally else "",
+        "signal": signal_number,
+        "exit_status": exit_status,
+    }
+    (work_dir / _EDITOR_SCRIPT_NAME).with_suffix(".json").write_text(json.dumps(plan), encoding="utf-8")
+    return session_logs
+
+
+def _supervise_stand_in(
+    work_dir: pathlib.Path,
+    session_logs: ballroom_scribe.gui.models.SessionLogs,
+) -> tuple[int, list[str], str]:
+    """Runs the stand-in editor under the supervisor, in this process.
+
+    Returns:
+        The supervisor's exit status, what it reported as a crash, and the session's console log.
+    """
+    reported: list[str] = []
+    exit_status = ballroom_scribe.gui.supervise_editor(
+        ["--verbose"],
+        session_logs=session_logs,
+        editor_command=(sys.executable, "-u", str(work_dir / _EDITOR_SCRIPT_NAME)),
+        on_crash=lambda _session_logs, summary: reported.append(summary),
+    )
+    return exit_status, reported, session_logs.console_log.read_text(encoding="utf-8")
+
+
+def _check_supervisor(fixture: _Fixture) -> None:
+    """The editor's supervisor keeps what an editor writes to its console and reports an editor that ends badly."""
+    work_dir = fixture.work_dir
+    editor_script = work_dir / _EDITOR_SCRIPT_NAME
+    editor_script.write_text(_EDITOR_SCRIPT, encoding="utf-8")
+    print("  (the lines that are printed next are those of a stand-in editor)")
+
+    # 1. An editor that exits normally is not reported. Everything that it wrote to its console is kept, in order,
+    # whichever way it was written, and it was told its arguments and where the session keeps its logs.
+    session_logs = _leave_editor_plan(work_dir, "exits_normally")
+    exit_status, reported, console = _supervise_stand_in(work_dir, session_logs)
+    _expect(exit_status == 0 and not reported, f"A normal exit gave status {exit_status} and the report {reported}")
+    _expect(
+        console.splitlines()
+        == [
+            "Arguments: ['--verbose']",
+            f"Session: {session_logs.directory}",
+            "A line on standard error, as from logging",
+            "Bytes on file descriptor 2, as from Qt or FFmpeg",
+        ],
+        f"The console log of an editor that exited normally holds {console!r}",
+    )
+
+    # 2. An editor that fails is reported once the console log is complete, and a report takes that log in.
+    session_logs = _leave_editor_plan(work_dir, "fails", exit_status=3)
+    exit_status, reported, console = _supervise_stand_in(work_dir, session_logs)
+    _expect(
+        exit_status == 3 and reported == ["The editor exited with status 3."],
+        f"An editor that failed gave status {exit_status} and the report {reported}",
+    )
+    _expect(
+        console.endswith("\nThe editor exited with status 3.\n"),
+        f"The console log does not end with how the editor ended: {console[-120:]!r}",
+    )
+    report = ballroom_scribe.gui.utils.write_problem_report(session_logs, reported[0]).read_text(encoding="utf-8")
+    _expect(
+        "== What happened ==\nThe editor exited with status 3.\n" in report
+        and "== console.log ==\nArguments: ['--verbose']\n" in report
+        and "Bytes on file descriptor 2, as from Qt or FFmpeg\n" in report,
+        "The report of an editor that failed lacks its console log",
+    )
+
+    # 3. An editor that fails after its window was closed in good order cost the user nothing and is not reported.
+    session_logs = _leave_editor_plan(work_dir, "fails_after_closing", exit_status=3, closes_normally=True)
+    exit_status, reported, console = _supervise_stand_in(work_dir, session_logs)
+    _expect(
+        exit_status == 3 and not reported,
+        f"An editor that failed after closing gave status {exit_status} and the report {reported}",
+    )
+    _expect(
+        console.endswith("\nThe editor exited with status 3 after its window had been closed.\n"),
+        f"The console log does not say that the window had been closed: {console[-120:]!r}",
+    )
+
+    # 4. An editor that the system kills is reported with the signal that ended it (where there are signals).
+    if os.name == "posix":
+        killed = int(signal.SIGKILL)
+        session_logs = _leave_editor_plan(work_dir, "is_killed", signal_number=killed)
+        exit_status, reported, console = _supervise_stand_in(work_dir, session_logs)
+        _expect(
+            exit_status == 128 + killed and reported == [f"The editor was ended by signal {killed} (SIGKILL)."],
+            f"An editor that was killed gave status {exit_status} and the report {reported}",
+        )
+        _expect("Bytes on file descriptor 2" in console, "What a killed editor wrote before it died was lost")
+
+    # 5. In a process of its own, as `edit_timestamps.py` runs it, the supervisor reports a crash without ever
+    # having loaded Qt: it has to stay small, and it has to work when Qt is what fails.
+    session_logs = _leave_editor_plan(work_dir, "in_own_process", exit_status=3)
+    probe = subprocess.run(
+        [sys.executable, "-c", _SUPERVISOR_PROBE, str(session_logs.directory), str(editor_script)],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_SUPERVISOR_TIMEOUT_SECONDS,
+    )
+    _expect(
+        probe.returncode == 0
+        and probe.stdout.splitlines()[-1:]
+        == ["status=3 reported=['The editor exited with status 3.'] qt_loaded=False"],
+        f"The supervisor in a process of its own printed {probe.stdout!r} and {probe.stderr[-300:]!r}",
+    )
+    # The supervisor passes on to its own console what the editor wrote.
+    _expect(
+        "Bytes on file descriptor 2, as from Qt or FFmpeg" in probe.stderr,
+        f"The supervisor did not pass the editor's console on to its own: {probe.stderr[-300:]!r}",
+    )
+
+    # 6. `edit_timestamps.py` answers `--help` itself, before it starts an editor.
+    usage = subprocess.run(
+        [sys.executable, str(_REPO_ROOT / "edit_timestamps.py"), "--help"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=_SUPERVISOR_TIMEOUT_SECONDS,
+    )
+    _expect(
+        usage.returncode == 0 and usage.stdout.startswith("usage: edit_timestamps.py"),
+        f"edit_timestamps.py --help exited with {usage.returncode} and printed {usage.stdout[:120]!r}",
+    )
+
+
 def _check_close_during_transcription(fixture: _Fixture) -> None:
     """A window closes promptly while its transcription worker is still running, and the worker goes with it."""
     work_dir = fixture.work_dir
@@ -4111,6 +4300,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Report a problem from the Help menu", _check_problem_report),
         ("Offer to report an unhandled exception, once", _check_unhandled_exception),
         ("Offer to report a pipeline run that fails", _check_failed_pipeline),
+        ("Supervise an editor that exits, fails, or is killed", _check_supervisor),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),
         ("Close a window while speech is being transcribed", _check_close_during_transcription),

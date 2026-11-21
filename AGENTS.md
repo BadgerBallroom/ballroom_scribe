@@ -136,6 +136,15 @@
     channel, or cache directory changes, when the window closes, and before it
     launches `find_timestamps.py`. Its standard output carries nothing but the
     transcript, one `encode_transcript_chunk` line per speech chunk.
+*   **The editor runs under a supervisor**: `edit_timestamps.py` only runs
+    `ballroom_scribe.gui.supervise_editor`, which starts the editor
+    (`python -m ballroom_scribe.gui.run_editor`) as a child process, copies
+    everything that the editor writes to its console into the session's
+    `console.log`, and shows `ProblemReportDialog` itself when the editor dies:
+    a process that has crashed cannot report anything. The supervisor has to
+    outlive whatever happens to the editor, so it imports nothing of Qt until
+    the editor has crashed (`tests/gui/test_supervise_editor.py` checks this)
+    and depends on nothing that the editor does.
 *   **Cancellable background subprocesses**: Long-running subprocesses started
     from the GUI (e.g., `ffmpeg` in `extract_audio`) take an optional
     `threading.Event` and poll it around `subprocess.Popen.wait(timeout=...)`,
@@ -157,7 +166,10 @@
     than expecting users to reproduce the failure with `--verbose`.
     `faulthandler` and `FreezeWatchdog` write to the same file when the process
     dies or its GUI thread hangs, which is why the file that
-    `open_session_log` returns is never closed.
+    `open_session_log` returns is never closed. What never passes through
+    `logging` (Qt's own messages, the output of `ffmpeg`, tracebacks that
+    Python prints) reaches the session only through the editor's console, which
+    the supervisor copies into `console.log`.
 *   **Reporting problems**: Whatever tells the user that something failed
     should lead to `MainWindow.report_problem`, which writes the session's
     report file (`write_problem_report`) and shows `ProblemReportDialog`. The
@@ -232,7 +244,7 @@ these conventions for what does and doesn't have unit tests:
 *   **GUI services and table models (`ballroom_scribe/gui/` →
     `tests/gui/test_*.py`)**: Non-widget GUI logic (`VideoSession`,
     `EventTableModel`, `PipelineRunner`, `run_transcription_worker`,
-    `run_editor`, `parse_editor_args`, `FreezeWatchdog`,
+    `run_editor`, `supervise_editor`, `parse_editor_args`, `FreezeWatchdog`,
     `UnhandledExceptionReporter`, `WaveformLoader._prepare_envelope`) is
     unit-tested headlessly. Tests that import `PySide6` skip cleanly via
     `unittest.SkipTest` when the optional GUI dependency is not installed.

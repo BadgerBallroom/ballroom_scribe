@@ -37,7 +37,8 @@ def _remove_old_sessions(log_root: pathlib.Path) -> None:
         entry for entry in log_root.iterdir() if _SESSION_NAME_RE.fullmatch(entry.name) and entry.is_dir()
     )
     for old_session in sessions[:-_KEPT_SESSIONS]:
-        # A folder that cannot be deleted, such as that of a session that is still running, is left for next time.
+        # A folder that cannot be deleted is left for next time. On Windows, that includes the folder of a session
+        # that is still running, because its log is open.
         shutil.rmtree(old_session, ignore_errors=True)
 
 
