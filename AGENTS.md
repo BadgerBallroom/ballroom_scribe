@@ -147,9 +147,17 @@
     using `INFO` for one-time milestones (media loaded, first frame rendered),
     `DEBUG` for chatty state transitions, and `WARNING`/`ERROR` for problems
     the user must see. `ballroom_scribe.gui.utils.configure_logging` (called by
-    `edit_timestamps.py` and `smoke_test_editor.py`) owns `logging.basicConfig`,
+    `run_editor` and `smoke_test_editor.py`) owns `logging.basicConfig`,
     forces Qt's own handler to print to stderr in a matching format, and enables
     Qt multimedia debug categories only for `--verbose`.
+*   **Session logs**: Every run of the editor keeps its logs in a folder of its
+    own (`ballroom_scribe.gui.utils.current_session_logs`). `configure_logging`
+    writes every level to the session's log file there, whatever `--verbose`
+    says, so log what someone diagnosing a failure will need at `DEBUG` rather
+    than expecting users to reproduce the failure with `--verbose`.
+    `faulthandler` and `FreezeWatchdog` write to the same file when the process
+    dies or its GUI thread hangs, which is why the file that
+    `open_session_log` returns is never closed.
 *   **No Python on Qt's worker threads**: Never install a Python
     `qInstallMessageHandler`, and never connect plain Python callables to
     signals emitted from non-GUI threads (`QVideoSink.videoFrameChanged`,
@@ -216,6 +224,7 @@ these conventions for what does and doesn't have unit tests:
 *   **GUI services and table models (`ballroom_scribe/gui/` →
     `tests/gui/test_*.py`)**: Non-widget GUI logic (`VideoSession`,
     `EventTableModel`, `PipelineRunner`, `run_transcription_worker`,
+    `run_editor`, `parse_editor_args`, `FreezeWatchdog`,
     `WaveformLoader._prepare_envelope`) is unit-tested headlessly. Tests that
     import `PySide6` skip cleanly via `unittest.SkipTest` when the optional GUI
     dependency is not installed.
@@ -263,7 +272,8 @@ these conventions for what does and doesn't have unit tests:
         `find_closest_matching.py`), and abstract base classes/TypedDicts
         (`group_abc.py`) are not tested directly when covered by their callers.
     *   Low-level OS hooks such as the Windows-only
-        `_fix_windows_dll_search_path()` are not unit-tested.
+        `_fix_windows_dll_search_path()` and the macOS-only
+        `_set_macos_process_name()` are not unit-tested.
 *   **Real I/O, subprocesses, and ML model execution**: Unit tests never perform
     real disk I/O, run external binaries (`ffmpeg`), or execute real ML/GPU
     models (`panns_inference`, `faster_whisper`, `ollama`,

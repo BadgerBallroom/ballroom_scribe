@@ -3,6 +3,8 @@ from .comment_icon import comment_icon
 from .compute_waveform_envelope import compute_waveform_envelope
 from .configure_logging import configure_logging
 from .create_app_icon import create_app_icon
+from .create_application import create_application
+from .current_session_logs import current_session_logs
 from .decode_transcript_chunk import decode_transcript_chunk
 from .describe_process_exit import describe_process_exit
 from .distribute_column_widths import distribute_column_widths
@@ -15,6 +17,7 @@ from .group_words_into_captions import group_words_into_captions
 from .is_stale_position import is_stale_position
 from .layout_captions import layout_captions
 from .merge_speech_markers import merge_speech_markers
+from .open_session_log import open_session_log
 from .paint_frame import paint_frame
 from .sort_rows_by_inpoint import sort_rows_by_inpoint
 from .split_console_lines import split_console_lines
@@ -25,6 +28,8 @@ __all__ = [
     "compute_waveform_envelope",
     "configure_logging",
     "create_app_icon",
+    "create_application",
+    "current_session_logs",
     "decode_transcript_chunk",
     "describe_process_exit",
     "distribute_column_widths",
@@ -37,6 +42,7 @@ __all__ = [
     "is_stale_position",
     "layout_captions",
     "merge_speech_markers",
+    "open_session_log",
     "paint_frame",
     "sort_rows_by_inpoint",
     "split_console_lines",

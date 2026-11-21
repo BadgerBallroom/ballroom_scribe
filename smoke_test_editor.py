@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator
+from typing import TextIO
 
 import numpy as np
 from PySide6 import QtCore, QtGui, QtMultimedia, QtMultimediaWidgets, QtTest, QtWidgets
@@ -71,6 +72,9 @@ _CELL_INTERIOR_INSET = 6
 _COLOR_TOLERANCE = 8
 _WORKER_SCRIPT_NAME = "smoke_transcription_worker.py"
 _TRANSCRIPT_DIR_NAME = "transcripts"
+_SESSION_DIR_NAME = "session"
+# Short enough to keep the test quick, and long enough that a busy machine does not look frozen.
+_FREEZE_SECONDS = 1.0
 _TRANSCRIPTION_TIMEOUT_SECONDS = 30.0
 _SPEECH_CHUNK_DELAY_SECONDS = 0.6
 _SPEECH_SAMPLE_RATE = 32_000
@@ -143,6 +147,8 @@ class _Fixture:
     second_clip: pathlib.Path
     long_clip: pathlib.Path
     windowed: bool
+    session_logs: ballroom_scribe.gui.models.SessionLogs
+    session_log: TextIO
 
 
 @dataclasses.dataclass(frozen=True)
@@ -3702,6 +3708,13 @@ def _check_failed_transcription(fixture: _Fixture) -> None:
         f"Status bar after the worker failed: {window.statusBar().currentMessage()!r}",
     )
     _expect(window.transcription_status == "", f"Status bar label after the failure: {window.transcription_status!r}")
+    # The session log says what the worker printed and how it ended, without `--verbose`.
+    log = fixture.session_logs.editor_log.read_text(encoding="utf-8")
+    _expect(
+        "Transcription worker: OSError: The model could not be downloaded." in log,
+        "The session log lacks what the failed worker printed",
+    )
+    _expect("exited with status 3" in log, "The session log does not say how the failed worker ended")
     _settle(fixture.app, 1.5)
     _expect(not window.is_transcribing, "The worker was started again although transcription is switched off")
 
@@ -3715,6 +3728,43 @@ def _check_failed_transcription(fixture: _Fixture) -> None:
         _TRANSCRIPTION_TIMEOUT_SECONDS,
         "the whole transcript after switching background transcription back on",
     )
+
+
+def _check_freeze_watchdog(fixture: _Fixture) -> None:
+    """A GUI thread that stops running its event loop gets the stack of every thread written to the session log."""
+    log_path = fixture.session_logs.editor_log
+    log_size_before = log_path.stat().st_size
+
+    def freezes_recorded() -> int:
+        return written_since_the_start().count("Timeout (")
+
+    def written_since_the_start() -> str:
+        with open(log_path, encoding="utf-8") as log:
+            log.seek(log_size_before)
+            return log.read()
+
+    watchdog = ballroom_scribe.gui.FreezeWatchdog(fixture.session_log, freeze_seconds=_FREEZE_SECONDS)
+    watchdog.start()
+    try:
+        # However long the event loop turns, nothing is written.
+        _settle(fixture.app, 2 * _FREEZE_SECONDS)
+        _expect(freezes_recorded() == 0, "The freeze watchdog wrote stacks while the event loop was running")
+        # The GUI thread is stuck here for longer than the watchdog allows.
+        time.sleep(2 * _FREEZE_SECONDS)
+        fixture.app.processEvents()
+    finally:
+        watchdog.stop()
+    _expect(
+        freezes_recorded() == 1,
+        f"A GUI thread that was stuck once left {freezes_recorded()} sets of stacks in the session log",
+    )
+    _expect(
+        "_check_freeze_watchdog" in written_since_the_start(),
+        "The stacks in the session log do not show where the GUI thread was stuck",
+    )
+    # A watchdog that has been stopped stays quiet, however long the GUI thread takes.
+    time.sleep(1.5 * _FREEZE_SECONDS)
+    _expect(freezes_recorded() == 1, "The freeze watchdog wrote stacks after it had been stopped")
 
 
 def _check_close_during_transcription(fixture: _Fixture) -> None:
@@ -3803,6 +3853,7 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Keep an offline video in the drop-down", _check_offline_videos),
         ("Show transcribed speech as captions and along the waveform", _check_transcribed_speech),
         ("Keep the speech of a transcription worker that fails", _check_failed_transcription),
+        ("Record the stacks of a GUI thread that is stuck", _check_freeze_watchdog),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),
         ("Close a window while speech is being transcribed", _check_close_during_transcription),
@@ -3819,15 +3870,20 @@ def main(argv: list[str] | None = None) -> int:
     if sys.stdout is not None:
         # Keep progress lines interleaved correctly with log output when stdout is piped to a file.
         sys.stdout.reconfigure(line_buffering=True)
-    ballroom_scribe.gui.utils.configure_logging(args.verbose)
+    work_dir = args.work_dir or pathlib.Path(tempfile.mkdtemp(prefix="ballroom_scribe_smoke_"))
+    work_dir.mkdir(parents=True, exist_ok=True)
+    # The editor's log of this run is kept in the work directory, like everything else that the test makes.
+    session_logs = ballroom_scribe.gui.models.SessionLogs(work_dir / _SESSION_DIR_NAME)
+    if session_logs.directory.exists():
+        shutil.rmtree(session_logs.directory)
+    session_log = ballroom_scribe.gui.utils.open_session_log(session_logs)
+    ballroom_scribe.gui.utils.configure_logging(args.verbose, session_log)
     _check_import_footprint()
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         print("ffmpeg was not found on PATH; install it as described in README.md", file=sys.stderr)
         return 1
-    work_dir = args.work_dir or pathlib.Path(tempfile.mkdtemp(prefix="ballroom_scribe_smoke_"))
-    work_dir.mkdir(parents=True, exist_ok=True)
     print(f"Work directory: {work_dir}")
     if not args.windowed:
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -3866,6 +3922,8 @@ def main(argv: list[str] | None = None) -> int:
             second_clip=second_clip,
             long_clip=long_clip,
             windowed=args.windowed,
+            session_logs=session_logs,
+            session_log=session_log,
         )
         _run_checks(fixture)
         if window.isVisible():
