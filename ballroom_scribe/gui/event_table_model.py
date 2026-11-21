@@ -312,23 +312,24 @@ class EventTableModel(QtCore.QAbstractTableModel):
     )
     # Every free-text column, i.e. the scope of Find and Replace.
     SEARCHABLE_COLUMNS = (*TEXT_COLUMNS, Column.COMMENT)
-    _EDITABLE_COLUMNS = frozenset(
+    _INPOINT_COLUMNS = frozenset(
         {
             Column.INPOINT,
+            Column.INPOINT_FORMATTED,
+        }
+    )
+    _EDITABLE_COLUMNS = frozenset(
+        {
+            *_INPOINT_COLUMNS,
             *SEARCHABLE_COLUMNS,
         }
     )
     # Columns whose value can be copied into neighbouring rows with the fill handle; an inpoint never should be, and
     # a comment cell may be only an icon wide.
     _FILLABLE_COLUMNS = frozenset(TEXT_COLUMNS)
-    # Columns that may be left empty; `Inpoint` is required and `File` / `Inpoint Formatted` are read-only.
+    # Columns that may be left empty; inpoint columns are required and `File` is read-only.
     _CLEARABLE_COLUMNS = frozenset(SEARCHABLE_COLUMNS)
-    _RIGHT_ALIGNED_COLUMNS = frozenset(
-        {
-            Column.INPOINT,
-            Column.INPOINT_FORMATTED,
-        }
-    )
+    _RIGHT_ALIGNED_COLUMNS = _INPOINT_COLUMNS
 
     def __init__(
         self,
@@ -531,7 +532,9 @@ class EventTableModel(QtCore.QAbstractTableModel):
         old_record = self._records[row]
         text = str(value).strip()
 
-        if column == self.Column.INPOINT:
+        if column in self._INPOINT_COLUMNS:
+            if column == self.Column.INPOINT_FORMATTED and text == old_record.inpoint_formatted:
+                return False
             try:
                 seconds = ballroom_scribe.utils.parse_duration(text)
             except ValueError:
@@ -551,7 +554,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
             old_record,
             new_record,
             f"Edit {header_name}",
-            reorder=column == self.Column.INPOINT,
+            reorder=column in self._INPOINT_COLUMNS,
         )
         return True
 

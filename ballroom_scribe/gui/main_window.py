@@ -28,6 +28,8 @@ _VIDEO_FILE_FILTER = "Video Files (*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.mts *.
 _CSV_FILE_FILTER = "CSV Files (*.csv);;All Files (*)"
 _MIN_FILE_COLUMN_WIDTH = 160
 _MAX_FILE_COLUMN_WIDTH = 180
+_INPOINT_FORMATTED_WIDTH_RATIO = 0.6
+_SAMPLE_FORMATTED_INPOINT = "0:00:00.00"
 _MIN_NARROW_COLUMN_WIDTH = 52
 _MIN_TEXT_COLUMN_WIDTH = 90
 # The `Comment` column shows its text only when it can start this wide while `Event Number` … `Round` keep their
@@ -59,6 +61,14 @@ def _quit_key_sequences() -> list[QtGui.QKeySequence]:
     """Returns the platform's standard Quit bindings, or `Alt+F4` where it has none (Windows)."""
     standard = QtGui.QKeySequence.keyBindings(QtGui.QKeySequence.StandardKey.Quit)
     return list(standard) if standard else [QtGui.QKeySequence("Alt+F4")]
+
+
+def _min_inpoint_formatted_width(view: QtWidgets.QTableView) -> int:
+    """Returns the minimum pixel width needed to display `Inpoint Formatted` values without elision."""
+    section = int(ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED)
+    margin = view.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_FocusFrameHMargin, None, view) + 1
+    sample_width = view.fontMetrics().horizontalAdvance(_SAMPLE_FORMATTED_INPOINT) + 2 * margin + 2
+    return max(sample_width, view.sizeHintForColumn(section))
 
 
 def _with_shortcut_hint(action: QtGui.QAction, description: str) -> None:
@@ -804,6 +814,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _configure_table_view(self) -> None:
         self._table_view.setModel(self._table_model)
+        self._table_view.setColumnHidden(int(ballroom_scribe.gui.EventTableModel.Column.INPOINT), True)
         self._table_view.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         # `ExtendedSelection` supports `Shift`+click / `Shift+↑↓` ranges, `Ctrl`+click (`⌘` on macOS) row toggling,
         # press-and-drag ranges, and `Ctrl+A`; when ≥2 rows are selected, `CurrentCellDelegate` and `EventTableView`
@@ -851,6 +862,9 @@ class MainWindow(QtWidgets.QMainWindow):
         file_section = int(ballroom_scribe.gui.EventTableModel.Column.FILE)
         file_width = header.sectionSize(file_section)
         header.resizeSection(file_section, min(max(file_width, _MIN_FILE_COLUMN_WIDTH), _MAX_FILE_COLUMN_WIDTH))
+        inpoint_section = int(ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED)
+        inpoint_width = round(header.sectionSize(inpoint_section) * _INPOINT_FORMATTED_WIDTH_RATIO)
+        header.resizeSection(inpoint_section, max(inpoint_width, _min_inpoint_formatted_width(self._table_view)))
         self._fit_text_columns(equalize=True)
 
     def _fit_text_columns(self, *, equalize: bool) -> None:

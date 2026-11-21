@@ -80,10 +80,11 @@ class TestEventTableModel(unittest.TestCase):
 
         col = ballroom_scribe.gui.EventTableModel.Column
         self.assertFalse(bool(self.model.flags(self.model.index(0, col.FILE)) & QtCore.Qt.ItemFlag.ItemIsEditable))
-        self.assertFalse(
-            bool(self.model.flags(self.model.index(0, col.INPOINT_FORMATTED)) & QtCore.Qt.ItemFlag.ItemIsEditable)
-        )
-        for editable_col in (col.INPOINT, *ballroom_scribe.gui.EventTableModel.SEARCHABLE_COLUMNS):
+        for editable_col in (
+            col.INPOINT,
+            col.INPOINT_FORMATTED,
+            *ballroom_scribe.gui.EventTableModel.SEARCHABLE_COLUMNS,
+        ):
             self.assertTrue(
                 bool(self.model.flags(self.model.index(0, editable_col)) & QtCore.Qt.ItemFlag.ItemIsEditable)
             )
@@ -96,6 +97,7 @@ class TestEventTableModel(unittest.TestCase):
         self.assertEqual(self.model.data(inpoint_idx, QtCore.Qt.ItemDataRole.DisplayRole), "12.346")
         self.assertEqual(self.model.data(inpoint_idx, QtCore.Qt.ItemDataRole.EditRole), "12.3456")
         self.assertEqual(self.model.data(formatted_idx, QtCore.Qt.ItemDataRole.DisplayRole), "0:00:12.35")
+        self.assertEqual(self.model.data(formatted_idx, QtCore.Qt.ItemDataRole.EditRole), "0:00:12.35")
         right_vcenter = int(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         self.assertEqual(self.model.data(inpoint_idx, QtCore.Qt.ItemDataRole.TextAlignmentRole), right_vcenter)
         self.assertEqual(self.model.data(formatted_idx, QtCore.Qt.ItemDataRole.TextAlignmentRole), right_vcenter)
@@ -103,26 +105,63 @@ class TestEventTableModel(unittest.TestCase):
 
     @parameterized.expand(
         [
-            param("plain_seconds", typed="45.25", expected_seconds=45.25),
+            param(
+                "inpoint_plain_seconds",
+                column=ballroom_scribe.gui.EventTableModel.Column.INPOINT,
+                typed="45.25",
+                expected_seconds=45.25,
+                expected_undo="Edit Inpoint",
+            ),
             # Later than the video's other row (120.5 s), so the row moves below it on commit.
-            param("formatted_duration", typed="1:02:03.50", expected_seconds=3723.5, expected_row=2),
+            param(
+                "inpoint_formatted_duration",
+                column=ballroom_scribe.gui.EventTableModel.Column.INPOINT,
+                typed="1:02:03.50",
+                expected_seconds=3723.5,
+                expected_undo="Edit Inpoint",
+                expected_row=2,
+            ),
+            param(
+                "formatted_col_plain_seconds",
+                column=ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED,
+                typed="45.25",
+                expected_seconds=45.25,
+                expected_undo="Edit Inpoint Formatted",
+            ),
+            param(
+                "formatted_col_minutes_seconds",
+                column=ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED,
+                typed="1:05.25",
+                expected_seconds=65.25,
+                expected_undo="Edit Inpoint Formatted",
+            ),
+            param(
+                "formatted_col_hours_minutes_seconds",
+                column=ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED,
+                typed="1:02:03.50",
+                expected_seconds=3723.5,
+                expected_undo="Edit Inpoint Formatted",
+                expected_row=2,
+            ),
         ]
     )
     def test_set_data_parses_typed_inpoint_and_supports_undo_redo(
         self,
         _,
+        column: ballroom_scribe.gui.EventTableModel.Column,
         typed: str,
         expected_seconds: float,
+        expected_undo: str,
         expected_row: int = 0,
     ):
-        col = ballroom_scribe.gui.EventTableModel.Column
-        idx = self.model.index(0, col.INPOINT)
+        idx = self.model.index(0, column)
         self.assertTrue(self.model.undo_stack.isClean())
 
         ok = self.model.setData(idx, typed, QtCore.Qt.ItemDataRole.EditRole)
 
         self.assertTrue(ok)
         self.assertFalse(self.model.undo_stack.isClean())
+        self.assertEqual(self.model.undo_stack.undoText(), expected_undo)
         self.assertAlmostEqual(self.model.record_at(expected_row).inpoint_seconds, expected_seconds)
         self.assertEqual(self.model.record_at(expected_row).file, _VIDEO_A)
 
@@ -133,9 +172,18 @@ class TestEventTableModel(unittest.TestCase):
         self.model.undo_stack.redo()
         self.assertAlmostEqual(self.model.record_at(expected_row).inpoint_seconds, expected_seconds)
 
+    def test_set_data_keeps_sub_centisecond_precision_when_inpoint_formatted_is_unchanged(self):
+        col = ballroom_scribe.gui.EventTableModel.Column
+        idx = self.model.index(0, col.INPOINT_FORMATTED)
+
+        self.assertFalse(self.model.setData(idx, " 0:00:12.35 ", QtCore.Qt.ItemDataRole.EditRole))
+        self.assertAlmostEqual(self.model.record_at(0).inpoint_seconds, 12.3456)
+        self.assertTrue(self.model.undo_stack.isClean())
+
     def test_set_data_rejects_invalid_inpoint_and_read_only_columns(self):
         col = ballroom_scribe.gui.EventTableModel.Column
         self.assertFalse(self.model.setData(self.model.index(0, col.INPOINT), "not-a-time"))
+        self.assertFalse(self.model.setData(self.model.index(0, col.INPOINT_FORMATTED), "not-a-time"))
         self.assertFalse(self.model.setData(self.model.index(0, col.FILE), "other.mp4"))
         self.assertTrue(self.model.undo_stack.isClean())
 

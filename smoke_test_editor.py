@@ -465,10 +465,27 @@ def _check_csv_row_jump_renders_frames(fixture: _Fixture) -> None:
     _expect(window.table_model.rowCount() == _INITIAL_ROW_COUNT, "CSV rows were not loaded into the table")
     _expect(len(window.session) == 2, "Opening the CSV did not load the second video it references")
 
-    # Narrow numeric/ordinal columns share a compact width while regular text columns share a wider width.
+    # `Inpoint` is hidden, `Inpoint Formatted` is ~40% thinner than its header, and text columns share the rest.
     header = window.table_view.horizontalHeader()
     model_cls = ballroom_scribe.gui.EventTableModel
     col = model_cls.Column
+    inpoint_section = int(col.INPOINT)
+    inpoint_formatted_section = int(col.INPOINT_FORMATTED)
+    _expect(
+        window.table_view.isColumnHidden(inpoint_section) and header.sectionSize(inpoint_section) == 0,
+        f"Inpoint column should be hidden, got hidden={window.table_view.isColumnHidden(inpoint_section)},"
+        f" width={header.sectionSize(inpoint_section)}",
+    )
+    inpoint_formatted_width = header.sectionSize(inpoint_formatted_section)
+    full_header_width = header.sectionSizeFromContents(inpoint_formatted_section).width()
+    min_cell_width = window.table_view.sizeHintForColumn(inpoint_formatted_section)
+    max_expected_width = max(min_cell_width, round(full_header_width * 0.65))
+    _expect(
+        not window.table_view.isColumnHidden(inpoint_formatted_section)
+        and min_cell_width <= inpoint_formatted_width <= max_expected_width,
+        f"Inpoint Formatted width {inpoint_formatted_width} px is outside [{min_cell_width}, {max_expected_width}]"
+        f" (full header width {full_header_width} px)",
+    )
     narrow_widths = [
         header.sectionSize(int(column)) for column in model_cls.TEXT_COLUMNS if column in model_cls.NARROW_TEXT_COLUMNS
     ]
@@ -752,16 +769,16 @@ def _check_fill_handle(fixture: _Fixture) -> None:
         "A cancelled fill still changed the table",
     )
 
-    # Columns without a handle: the same corner of an Inpoint cell is an ordinary click.
-    inpoint_index = model.index(0, int(col.INPOINT))
+    # Columns without a handle: the same corner of an Inpoint Formatted cell is an ordinary click.
+    inpoint_index = model.index(0, int(col.INPOINT_FORMATTED))
     view.setCurrentIndex(inpoint_index)
     fixture.app.processEvents()
-    _expect(view.fill_handle_rect(inpoint_index).isNull(), "Inpoint cells must not offer a fill handle")
+    _expect(view.fill_handle_rect(inpoint_index).isNull(), "Inpoint Formatted cells must not offer a fill handle")
     QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(inpoint_index).bottomRight())
     fixture.app.processEvents()
     _expect(
         not view.is_filling and undo_state() == undo_before_cancel,
-        "Clicking the corner of an Inpoint cell started a fill",
+        "Clicking the corner of an Inpoint Formatted cell started a fill",
     )
     view.setCurrentIndex(model.index(0, 0))
     fixture.app.processEvents()
@@ -1496,7 +1513,7 @@ def _check_editing_commands(fixture: _Fixture) -> None:
     _expect(model.record_at(0).inpoint_formatted == "0:00:04.12", "Set Inpoint did not update Inpoint Formatted")
     _expect(not model.undo_stack.isClean(), "Set Inpoint did not mark the document modified")
 
-    _expect(model.setData(model.index(1, int(col.INPOINT)), "0:00:07.50"), "Typing an inpoint was rejected")
+    _expect(model.setData(model.index(1, int(col.INPOINT_FORMATTED)), "0:00:07.50"), "Typing an inpoint was rejected")
     _expect(abs(model.record_at(1).inpoint_seconds - 7.5) < 1e-6, "Typed inpoint was not parsed")
     _expect(rows() == [(clip, 4.125), (clip, 7.5), (second_clip, 3.25)], f"Unexpected rows before adding: {rows()}")
 
@@ -1555,14 +1572,36 @@ def _check_editing_commands(fixture: _Fixture) -> None:
         f"Undo did not move the row back to the top: {rows()}, current row {view.currentIndex().row()}",
     )
 
+    # Opening and committing an unchanged Inpoint Formatted cell keeps millisecond precision untouched.
+    _focus_table(fixture)
+    row_0_inpoint_index = model.index(0, int(col.INPOINT_FORMATTED))
+    view.setCurrentIndex(row_0_inpoint_index)
+    view.edit(row_0_inpoint_index)
+    fixture.app.processEvents()
+    unchanged_editor = _open_cell_editor(fixture)
+    _expect(
+        isinstance(unchanged_editor, QtWidgets.QLineEdit) and unchanged_editor.text() == "0:00:04.12",
+        f"Inpoint Formatted editor opened with {getattr(unchanged_editor, 'text', lambda: None)()!r}",
+    )
+    assert isinstance(unchanged_editor, QtWidgets.QLineEdit)
+    QtTest.QTest.keyClick(unchanged_editor, QtCore.Qt.Key.Key_Return)
+    fixture.app.processEvents()
+    _expect(
+        abs(model.record_at(0).inpoint_seconds - 4.125) < 1e-6,
+        f"Committing an unchanged Inpoint Formatted rounded 4.125 s to {model.record_at(0).inpoint_seconds}",
+    )
+
     # A typed inpoint moves the row when it is committed, not while it is being typed.
     _focus_table(fixture)
-    inpoint_index = model.index(1, int(col.INPOINT))
+    inpoint_index = model.index(1, int(col.INPOINT_FORMATTED))
     view.setCurrentIndex(inpoint_index)
     view.edit(inpoint_index)
     fixture.app.processEvents()
     editor = _open_cell_editor(fixture)
-    _expect(isinstance(editor, QtWidgets.QLineEdit), f"Inpoint editor is {type(editor).__name__}, expected a line edit")
+    _expect(
+        isinstance(editor, QtWidgets.QLineEdit),
+        f"Inpoint Formatted editor is {type(editor).__name__}, expected a line edit",
+    )
     assert isinstance(editor, QtWidgets.QLineEdit)
     editor.selectAll()
     QtTest.QTest.keyClicks(editor, "1.5")
@@ -1752,17 +1791,17 @@ def _check_spreadsheet_typing_and_clear(fixture: _Fixture) -> None:
         )
         _cancel_cell_editor(fixture)
 
-    # 3. Typing a digit on Inpoint opens its editor with that digit.
+    # 3. Typing a digit on Inpoint Formatted opens its editor with that digit.
     if not _focus_table(fixture):
         return
-    inpoint_index = model.index(0, int(col.INPOINT))
+    inpoint_index = model.index(0, int(col.INPOINT_FORMATTED))
     view.setCurrentIndex(inpoint_index)
     fixture.app.processEvents()
     _press(fixture, key.Key_3)
     editor = _open_cell_editor(fixture)
     _expect(
         isinstance(editor, QtWidgets.QLineEdit) and editor.text() == "3",
-        "Typing '3' on Inpoint did not open its editor with '3'",
+        "Typing '3' on Inpoint Formatted did not open its editor with '3'",
     )
     _cancel_cell_editor(fixture)
 
@@ -1829,14 +1868,14 @@ def _check_spreadsheet_typing_and_clear(fixture: _Fixture) -> None:
     model.undo_stack.undo()
     _expect(model.record_at(0).dance == original_dance, "Undo did not restore the cleared Dance cell")
 
-    # 7. Delete on Inpoint changes nothing and leaves the undo stack untouched.
+    # 7. Delete on Inpoint Formatted changes nothing and leaves the undo stack untouched.
     view.setCurrentIndex(inpoint_index)
     fixture.app.processEvents()
     undo_before = undo_state()
     _press(fixture, key.Key_Delete)
     _expect(
         abs(model.record_at(0).inpoint_seconds - inpoint_before) < 1e-6 and undo_state() == undo_before,
-        "Delete on Inpoint changed the inpoint or pushed onto the undo stack",
+        "Delete on Inpoint Formatted changed the inpoint or pushed onto the undo stack",
     )
 
     # 8. Bare L still steps +1 s when the waveform has focus instead of the table.
