@@ -202,10 +202,46 @@ class TestWaveformLoader(unittest.TestCase):
     def test_reports_failure_for_current_video(self):
         self.mock_prepare_envelope.side_effect = OSError("disk full")
         self.loader.load(_VIDEO)
-        self._run_started_task()
+
+        with self.assertLogs(ballroom_scribe.gui.waveform_loader.__name__, level=logging.WARNING) as logs:
+            self._run_started_task()
 
         self.assertEqual(self.failed, [(_VIDEO, "disk full")])
         self.assertEqual(self.loaded, [])
+        self.assertTrue(self.loader.is_idle)
+        # An expected failure is logged in one line, without a traceback.
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("disk full", logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)
+
+    def test_reports_unexpected_failure_for_current_video(self):
+        # `_WaveformTask.run` does not expect this exception. It must still say that the load is over: otherwise the
+        # loader would wait for it forever and would never load this video again.
+        self.mock_prepare_envelope.side_effect = RuntimeError("the envelope has no bins")
+        self.loader.load(_VIDEO)
+
+        with self.assertLogs(ballroom_scribe.gui.waveform_loader.__name__, level=logging.WARNING) as logs:
+            self._run_started_task()
+
+        self.assertEqual(self.failed, [(_VIDEO, "RuntimeError: the envelope has no bins")])
+        self.assertEqual(self.loaded, [])
+        self.assertTrue(self.loader.is_idle)
+        # The traceback is logged, because an unexpected failure is a bug.
+        self.assertEqual([record.levelno for record in logs.records], [logging.ERROR, logging.WARNING])
+        self.assertIn("Traceback", logs.output[0])
+
+    def test_loads_a_video_again_after_an_unexpected_failure(self):
+        self.mock_prepare_envelope.side_effect = RuntimeError("the envelope has no bins")
+        self.loader.load(_VIDEO)
+        with self.assertLogs(ballroom_scribe.gui.waveform_loader.__name__, level=logging.WARNING):
+            self._run_started_task()
+
+        self.mock_prepare_envelope.side_effect = None
+        self.loader.load(_VIDEO)
+        self._run_started_task()
+
+        self.assertEqual(len(self.pool.started), 2)
+        self.assertEqual(self.loaded, [(_VIDEO, _ENVELOPE)])
 
     def test_cancel_sets_task_event_and_silences_result(self):
         self.loader.load(_VIDEO)

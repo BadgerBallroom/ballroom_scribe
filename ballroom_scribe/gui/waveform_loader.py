@@ -76,7 +76,11 @@ class _WorkerSignals(QtCore.QObject):
 
 
 class _WaveformTask(QtCore.QRunnable):
-    """Runnable task executing `_prepare_envelope` on a `QThreadPool` worker thread."""
+    """Runnable task executing `_prepare_envelope` on a `QThreadPool` worker thread.
+
+    Exactly one of `loaded`, `failed`, and `cancelled` is emitted, whatever `_prepare_envelope` raises: a task that
+    ended without saying so would stay in flight forever, and `WaveformLoader` would never load its video again.
+    """
 
     def __init__(self, video: ballroom_scribe.gui.models.LoadedVideo) -> None:
         super().__init__()
@@ -101,6 +105,10 @@ class _WaveformTask(QtCore.QRunnable):
             zipfile.BadZipFile,
         ) as err:
             self.signals.failed.emit(self, str(err))
+            return
+        except Exception as err:  # Anything escaping would leave this load in flight forever.
+            _LOGGER.exception("Unexpected error while loading the waveform of %s", self.video.input_video)
+            self.signals.failed.emit(self, f"{type(err).__name__}: {err}")
             return
         self.signals.loaded.emit(self, envelope)
 
@@ -178,6 +186,12 @@ class WaveformLoader(QtCore.QObject):
 
     def _on_task_failed(self, task: _WaveformTask, message: str) -> None:
         self._active_tasks.discard(task)
+        _LOGGER.warning(
+            "Could not load the waveform of %s (channel %d): %s",
+            task.video.input_video,
+            task.video.input_channel,
+            message,
+        )
         if task.video == self._current_video:
             self.failed.emit(task.video, message)
 
