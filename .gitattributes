@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Write the commit into archives of the repository, such as the ZIP files that GitHub offers for download, which have
+# no `.git` directory to ask (see `describe_version`)
+ballroom_scribe/utils/describe_version.py export-subst

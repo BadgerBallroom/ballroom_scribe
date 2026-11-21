@@ -1,3 +1,4 @@
+import io
 import os
 import pathlib
 import sys
@@ -9,9 +10,12 @@ import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
 import ballroom_scribe.gui.utils
 import ballroom_scribe.models
+import ballroom_scribe.utils
 
 _ARGV = ["-i", "video.mp4", "1", "-c", "cache"]
 _STANDARD_OUTPUT_COPY = 7
+_ENVIRONMENT = "Ballroom Scribe 0911b61b64dc\nPython 3.14.3 (python) on Windows-11\nPackages: torch 2.14.0"
+_TORCH_DEVICES = "PyTorch: CUDA 13.2 is available (1 device)"
 
 
 def _make_transcript_chunk(start_samples: int, text: str) -> ballroom_scribe.models.TranscriptChunk:
@@ -36,6 +40,13 @@ class TestRunTranscriptionWorker(unittest.TestCase):
         self.mock_transcript_stream = self.mock_fdopen.return_value
         # The worker replaces `sys.stdout`; the patch puts the original back after the test.
         self.enterContext(patch.object(sys, "stdout", sys.stdout))
+        self.mock_stderr = self.enterContext(patch.object(sys, "stderr", new_callable=io.StringIO))
+        self.mock_describe_environment = self.enterContext(
+            patch.object(ballroom_scribe.utils, "describe_environment", autospec=True, return_value=_ENVIRONMENT)
+        )
+        self.mock_describe_torch_devices = self.enterContext(
+            patch.object(ballroom_scribe.utils, "describe_torch_devices", autospec=True, return_value=_TORCH_DEVICES)
+        )
 
         self.input_cache_args = ballroom_scribe.cli.arguments.InputCacheArgs(
             input_video=pathlib.Path("video.mp4"),
@@ -134,6 +145,18 @@ class TestRunTranscriptionWorker(unittest.TestCase):
         )
         # What the pipeline prints goes to standard error.
         self.assertEqual(standard_output_during_run, [sys.stderr])
+
+    def test_names_the_environment_on_standard_error_before_the_pipeline_runs(self):
+        printed_before_the_run = []
+        self.mock_pipeline.run.side_effect = lambda inputs, on_speech_transcribed: printed_before_the_run.append(
+            self.mock_stderr.getvalue()
+        )
+
+        ballroom_scribe.gui.run_transcription_worker(_ARGV)
+
+        self.assertEqual(printed_before_the_run, [f"{_ENVIRONMENT}\n{_TORCH_DEVICES}\n"])
+        # None of it reaches the transcript, which the editor reads from standard output.
+        self.mock_transcript_stream.write.assert_not_called()
 
 
 if __name__ == "__main__":
