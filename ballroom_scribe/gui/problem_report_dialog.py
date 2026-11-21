@@ -97,6 +97,8 @@ class ProblemReportDialog(QtWidgets.QDialog):
         advice_label.setVisible(bool(advice))
         instructions_label = self._paragraph(instructions, "instructions")
         privacy_label = self._paragraph(_PRIVACY_NOTICE, "privacyNotice")
+        # Without a report file, there is nothing to warn about.
+        privacy_label.setVisible(self._report_file is not None)
         file_label = self._paragraph(str(self._report_file) if self._report_file is not None else "", "reportFile")
         file_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         file_label.setVisible(self._report_file is not None)
