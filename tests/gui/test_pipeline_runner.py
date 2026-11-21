@@ -1,7 +1,11 @@
+import logging
 import pathlib
+import signal
 import sys
 import unittest
 from unittest.mock import MagicMock, patch
+
+from parameterized import param, parameterized
 
 try:
     from PySide6 import QtCore
@@ -174,6 +178,125 @@ class TestPipelineRunner(unittest.TestCase):
         self.assertEqual(exit_codes, [])
         runner._on_error_occurred(QtCore.QProcess.ProcessError.FailedToStart)
         self.assertEqual(exit_codes, [-1])
+
+    def test_children_report_fatal_errors_and_print_utf8(self):
+        ballroom_scribe.gui.PipelineRunner()
+
+        (environment,), _ = self.mock_process.setProcessEnvironment.call_args
+        self.assertEqual(environment.value("PYTHONUTF8"), "1")
+        # A child that dies in native code then writes the Python stack of every thread to its standard error.
+        self.assertEqual(environment.value("PYTHONFAULTHANDLER"), "1")
+
+    def test_logs_the_command_that_it_starts(self):
+        runner = ballroom_scribe.gui.PipelineRunner()
+        inputs = [
+            ballroom_scribe.cli.arguments.InputCacheArgs(
+                input_video=pathlib.Path("clip.mp4"),
+                input_channel=1,
+                parent_cache_dir=pathlib.Path("."),
+            )
+        ]
+
+        with self.assertLogs(ballroom_scribe.gui.pipeline_runner.__name__, level=logging.INFO) as logs:
+            runner.start(
+                inputs=inputs,
+                output_csv=pathlib.Path("clip.csv"),
+                extra_args=["--ollama-model", "a model"],
+            )
+
+        self.assertEqual(len(logs.output), 1)
+        self.assertIn("find_timestamps.py -i clip.mp4 1 -c . --output-csv clip.csv", logs.output[0])
+        # An argument with a space in it is quoted, so that the logged command can be run as it is.
+        self.assertIn("--ollama-model 'a model'", logs.output[0])
+
+
+class TestExitDescription(unittest.TestCase):
+    """Unit tests for `PipelineRunner.exit_description` with a mocked `QProcess`."""
+
+    def setUp(self):
+        self.mock_qprocess_cls = self.enterContext(patch.object(QtCore, "QProcess", autospec=True))
+        self.mock_process = self.mock_qprocess_cls.return_value
+        self.mock_process.readyReadStandardOutput = MagicMock()
+        self.mock_process.readyReadStandardError = MagicMock()
+        self.mock_process.finished = MagicMock()
+        self.mock_process.errorOccurred = MagicMock()
+        self.mock_process.state.return_value = QtCore.QProcess.ProcessState.NotRunning
+        self.mock_process.readAllStandardOutput.return_value = _make_byte_array(b"")
+
+        self.runner = ballroom_scribe.gui.PipelineRunner()
+        self.exit_codes: list[int] = []
+        self.runner.finished.connect(self.exit_codes.append)
+
+    def _patch_exit_code_of_a_crash_is_a_signal(self, value: bool) -> None:
+        self.enterContext(patch.object(ballroom_scribe.gui.pipeline_runner, "_EXIT_CODE_OF_A_CRASH_IS_A_SIGNAL", value))
+
+    def test_is_empty_until_a_child_has_ended(self):
+        self.assertEqual(self.runner.exit_description, "")
+
+    def test_child_that_exited_by_itself(self):
+        self.runner._on_finished(1, QtCore.QProcess.ExitStatus.NormalExit)
+
+        self.assertEqual(self.runner.exit_description, "exited with status 1")
+        self.assertEqual(self.exit_codes, [1])
+
+    def test_child_that_a_signal_ended(self):
+        self._patch_exit_code_of_a_crash_is_a_signal(True)
+        segmentation_fault = int(signal.SIGSEGV)
+
+        self.runner._on_finished(segmentation_fault, QtCore.QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(self.runner.exit_description, f"was ended by signal {segmentation_fault} (SIGSEGV)")
+        self.assertEqual(self.exit_codes, [-1])
+
+    @parameterized.expand(
+        [
+            # `QProcess.exitCode` is a signed 32-bit number, so it reports `0xC0000005` as a negative number.
+            param(
+                "access_violation",
+                exit_code=-1073741819,
+                expected="crashed with status 0xC0000005 (access violation)",
+            ),
+            # The exit status that `QProcess.kill` gives a child on Windows.
+            param("killed_by_the_runner", exit_code=0xF291, expected="exited with status 62097"),
+        ]
+    )
+    def test_child_that_crashed_where_there_are_no_signals(self, _, exit_code, expected):
+        self._patch_exit_code_of_a_crash_is_a_signal(False)
+
+        self.runner._on_finished(exit_code, QtCore.QProcess.ExitStatus.CrashExit)
+
+        self.assertEqual(self.runner.exit_description, expected)
+        self.assertEqual(self.exit_codes, [-1])
+
+    def test_child_that_could_not_be_started(self):
+        self.mock_process.errorString.return_value = "execve: No such file or directory"
+
+        self.runner._on_error_occurred(QtCore.QProcess.ProcessError.FailedToStart)
+
+        self.assertEqual(self.runner.exit_description, "could not be started: execve: No such file or directory")
+        self.assertEqual(self.exit_codes, [-1])
+
+    def test_is_set_before_finished_is_emitted(self):
+        descriptions_when_finished: list[str] = []
+        self.runner.finished.connect(lambda _exit_code: descriptions_when_finished.append(self.runner.exit_description))
+
+        self.runner._on_finished(3, QtCore.QProcess.ExitStatus.NormalExit)
+
+        self.assertEqual(descriptions_when_finished, ["exited with status 3"])
+
+    def test_is_empty_again_once_the_next_child_is_started(self):
+        self.runner._on_finished(3, QtCore.QProcess.ExitStatus.NormalExit)
+
+        self.runner.start_transcription(
+            ballroom_scribe.cli.arguments.InputCacheArgs(
+                input_video=_VIDEO_A,
+                input_channel=1,
+                parent_cache_dir=_CACHE_A,
+            ),
+            ("python", "-m", "worker"),
+        )
+
+        self.assertEqual(self.runner.exit_description, "")
 
 
 class TestTranscriptionRunner(unittest.TestCase):

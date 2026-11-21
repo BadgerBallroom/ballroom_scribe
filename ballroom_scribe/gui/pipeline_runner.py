@@ -1,16 +1,23 @@
 """Out-of-process runner for `find_timestamps.py` and the transcription worker using `QProcess`."""
 
+import logging
+import os
 import pathlib
+import shlex
 import sys
 from collections.abc import Sequence
 
 from PySide6 import QtCore
 
 import ballroom_scribe.cli.arguments
+import ballroom_scribe.gui.utils
 
+_LOGGER = logging.getLogger(__name__)
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _FIND_TIMESTAMPS_SCRIPT = _REPO_ROOT / "find_timestamps.py"
 _MILLISECONDS_PER_SECOND = 1000
+# Where there are signals, `QProcess` reports the signal that ended a child process as the child's exit code.
+_EXIT_CODE_OF_A_CRASH_IS_A_SIGNAL = os.name == "posix"
 
 
 def _input_arguments(video_input: ballroom_scribe.cli.arguments.InputCacheArgs) -> list[str]:
@@ -60,6 +67,7 @@ class PipelineRunner(QtCore.QObject):
     arrives. That suits the transcription worker, whose standard output holds one transcript chunk per line.
 
     `finished` carries the child's exit status, or `-1` if it was killed, crashed, or could not be started.
+    `exit_description` says which of those it was.
     """
 
     output = QtCore.Signal(str)
@@ -77,6 +85,7 @@ class PipelineRunner(QtCore.QObject):
         """
         super().__init__(parent)
         self._merge_output = merge_output
+        self._exit_description = ""
         self._process = QtCore.QProcess(self)
         self._process.setProcessChannelMode(
             QtCore.QProcess.ProcessChannelMode.MergedChannels
@@ -87,12 +96,24 @@ class PipelineRunner(QtCore.QObject):
 
         environment = QtCore.QProcessEnvironment.systemEnvironment()
         environment.insert("PYTHONUTF8", "1")
+        # A child that dies in native code, of a segmentation fault in a model's library, say, then first writes the
+        # Python stack of every thread to its standard error, which arrives here like the rest of its output.
+        environment.insert("PYTHONFAULTHANDLER", "1")
         self._process.setProcessEnvironment(environment)
 
         self._process.readyReadStandardOutput.connect(self._on_ready_read)
         self._process.readyReadStandardError.connect(self._on_ready_read_error)
         self._process.finished.connect(self._on_finished)
         self._process.errorOccurred.connect(self._on_error_occurred)
+
+    @property
+    def exit_description(self) -> str:
+        """Returns how the last child process ended, as a phrase that completes "The process …".
+
+        Examples are `exited with status 1`, `was ended by signal 9 (SIGKILL)`, and `could not be started: …`. It is
+        set before `finished` is emitted, and it is empty from the moment a child is started until it has ended.
+        """
+        return self._exit_description
 
     def is_running(self) -> bool:
         """Returns whether the child process is currently running."""
@@ -107,8 +128,7 @@ class PipelineRunner(QtCore.QObject):
         """Starts `find_timestamps.py` with the given video inputs, output CSV, and extra CLI flags."""
         if self.is_running():
             raise RuntimeError("Pipeline is already running.")
-        command = _build_command(inputs=inputs, output_csv=output_csv, extra_args=extra_args)
-        self._process.start(command[0], command[1:])
+        self._start_process(_build_command(inputs=inputs, output_csv=output_csv, extra_args=extra_args))
 
     def start_transcription(
         self,
@@ -124,8 +144,7 @@ class PipelineRunner(QtCore.QObject):
         """
         if self.is_running():
             raise RuntimeError("The transcription worker is already running.")
-        full_command = _build_transcription_command(video_input, command)
-        self._process.start(full_command[0], full_command[1:])
+        self._start_process(_build_transcription_command(video_input, command))
 
     def cancel(self) -> None:
         """Terminates the running child process immediately, without waiting for it to exit."""
@@ -149,6 +168,12 @@ class PipelineRunner(QtCore.QObject):
         self._process.kill()
         return self._process.waitForFinished(round(timeout_seconds * _MILLISECONDS_PER_SECOND))
 
+    def _start_process(self, command: list[str]) -> None:
+        # The command line belongs in the log: the flags of a run are what someone needs to repeat a failure.
+        _LOGGER.info("Starting %s", shlex.join(command))
+        self._exit_description = ""
+        self._process.start(command[0], command[1:])
+
     def _on_ready_read(self) -> None:
         if self._merge_output:
             raw_data = self._process.readAllStandardOutput().data()
@@ -170,10 +195,15 @@ class PipelineRunner(QtCore.QObject):
             # A line that the child did not finish writing, because it was killed or it crashed, is not delivered.
             self._process.readAllStandardOutput()
             self._on_ready_read_error()
-        effective_code = exit_code if exit_status == QtCore.QProcess.ExitStatus.NormalExit else -1
-        self.finished.emit(effective_code)
+        crashed = exit_status != QtCore.QProcess.ExitStatus.NormalExit
+        self._exit_description = ballroom_scribe.gui.utils.describe_process_exit(
+            exit_code,
+            signal_number=exit_code if crashed and _EXIT_CODE_OF_A_CRASH_IS_A_SIGNAL else None,
+        )
+        self.finished.emit(-1 if crashed else exit_code)
 
     def _on_error_occurred(self, error: QtCore.QProcess.ProcessError) -> None:
         # `QProcess` emits no `finished` for a program that could not be started, so report that failure here.
         if error == QtCore.QProcess.ProcessError.FailedToStart:
+            self._exit_description = f"could not be started: {self._process.errorString()}"
             self.finished.emit(-1)

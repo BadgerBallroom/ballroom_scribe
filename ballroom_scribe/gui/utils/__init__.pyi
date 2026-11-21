@@ -4,6 +4,7 @@ from .compute_waveform_envelope import compute_waveform_envelope
 from .configure_logging import configure_logging
 from .create_app_icon import create_app_icon
 from .decode_transcript_chunk import decode_transcript_chunk
+from .describe_process_exit import describe_process_exit
 from .distribute_column_widths import distribute_column_widths
 from .encode_transcript_chunk import encode_transcript_chunk
 from .ends_sentence import ends_sentence
@@ -16,6 +17,7 @@ from .layout_captions import layout_captions
 from .merge_speech_markers import merge_speech_markers
 from .paint_frame import paint_frame
 from .sort_rows_by_inpoint import sort_rows_by_inpoint
+from .split_console_lines import split_console_lines
 
 __all__ = [
     "append_console_output",
@@ -24,6 +26,7 @@ __all__ = [
     "configure_logging",
     "create_app_icon",
     "decode_transcript_chunk",
+    "describe_process_exit",
     "distribute_column_widths",
     "encode_transcript_chunk",
     "ends_sentence",
@@ -36,4 +39,5 @@ __all__ = [
     "merge_speech_markers",
     "paint_frame",
     "sort_rows_by_inpoint",
+    "split_console_lines",
 ]

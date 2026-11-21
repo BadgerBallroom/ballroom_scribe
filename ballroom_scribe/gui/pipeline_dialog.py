@@ -1,5 +1,6 @@
 """Modal dialog for configuring, running, and monitoring `find_timestamps.py`."""
 
+import logging
 import pathlib
 import shlex
 from collections.abc import Sequence
@@ -11,9 +12,15 @@ import ballroom_scribe.cli.arguments
 import ballroom_scribe.gui
 import ballroom_scribe.gui.utils
 
+_LOGGER = logging.getLogger(__name__)
+
 
 class PipelineDialog(QtWidgets.QDialog):
-    """Configures output CSV and optional CLI flags, runs `PipelineRunner`, and streams output."""
+    """Configures output CSV and optional CLI flags, runs `PipelineRunner`, and streams output.
+
+    Everything that the pipeline prints is also logged, one record per line, so that the output of a failed run is
+    still there after the dialog has been closed.
+    """
 
     pipeline_starting = QtCore.Signal()
     pipeline_succeeded = QtCore.Signal(pathlib.Path)
@@ -34,8 +41,12 @@ class PipelineDialog(QtWidgets.QDialog):
         self._has_unsaved_edits = has_unsaved_edits
         self._target_csv: pathlib.Path | None = None
         self._overwrite_log_line = False
+        # The line of the pipeline's output that has not ended yet; it is logged once it has.
+        self._unfinished_output_line = ""
+        # Whether the user asked for the run to be canceled; a canceled run did not fail.
+        self._cancel_requested = False
         self._runner = ballroom_scribe.gui.PipelineRunner(self)
-        self._runner.output.connect(self._append_log)
+        self._runner.output.connect(self._on_runner_output)
         self._runner.finished.connect(self._on_runner_finished)
 
         videos_tree = QtWidgets.QTreeWidget(self)
@@ -170,14 +181,30 @@ class PipelineDialog(QtWidgets.QDialog):
         self._target_csv = output_csv
         self._log_view.clear()
         self._overwrite_log_line = False
+        self._unfinished_output_line = ""
+        self._cancel_requested = False
         self._set_running_ui(True)
         # Lets the main window stop its own audio extraction so the pipeline is the only writer of the cache.
         self.pipeline_starting.emit()
         self._runner.start(inputs=self._inputs, output_csv=output_csv, extra_args=extra_args)
 
     def _cancel_pipeline(self) -> None:
+        self._cancel_requested = True
         self._append_log("\nCanceling pipeline…\n")
         self._runner.cancel()
+
+    def _on_runner_output(self, text: str) -> None:
+        """Shows what the pipeline has printed and logs every line that this completes."""
+        lines, self._unfinished_output_line = ballroom_scribe.gui.utils.split_console_lines(
+            self._unfinished_output_line,
+            text,
+        )
+        self._log_output_lines(lines)
+        self._append_log(text)
+
+    def _log_output_lines(self, lines: Sequence[str]) -> None:
+        for line in lines:
+            _LOGGER.debug("find_timestamps.py: %s", line)
 
     def _append_log(self, text: str) -> None:
         self._overwrite_log_line = ballroom_scribe.gui.utils.append_console_output(
@@ -191,13 +218,22 @@ class PipelineDialog(QtWidgets.QDialog):
         self._log_view.ensureCursorVisible()
 
     def _on_runner_finished(self, exit_code: int) -> None:
+        # The last line of a pipeline that crashed may never have been ended.
+        if self._unfinished_output_line.strip():
+            self._log_output_lines([self._unfinished_output_line])
+        self._unfinished_output_line = ""
         self._set_running_ui(False)
         if exit_code == 0 and self._target_csv is not None:
+            _LOGGER.info("The pipeline succeeded and wrote %s", self._target_csv)
             self._append_log(f"\nPipeline succeeded. Loaded {self._target_csv}.\n")
             self.pipeline_succeeded.emit(self._target_csv)
             self._has_unsaved_edits = False
+        elif self._cancel_requested:
+            _LOGGER.info("The pipeline was canceled")
+            self._append_log("\nPipeline canceled.\n")
         else:
-            self._append_log(f"\nPipeline exited with status {exit_code}.\n")
+            _LOGGER.warning("The pipeline %s", self._runner.exit_description)
+            self._append_log(f"\nThe pipeline {self._runner.exit_description}.\n")
 
     def _set_running_ui(self, running: bool) -> None:
         self._run_button.setEnabled(not running)

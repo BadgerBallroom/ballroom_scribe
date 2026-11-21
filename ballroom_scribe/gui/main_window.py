@@ -292,6 +292,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._transcribing_video: ballroom_scribe.gui.models.LoadedVideo | None = None
         self._arriving_transcript: list[ballroom_scribe.models.TranscriptChunk] = []
         self._worker_progress: collections.deque[str] = collections.deque(maxlen=_WORKER_PROGRESS_LINES)
+        # The line of the worker's progress that has not ended yet.
+        self._unfinished_worker_progress_line = ""
         # Set from the moment a pipeline run starts until its dialog closes; no worker is started meanwhile.
         self._yielding_to_pipeline = False
         # Set once the window has been closed; a waveform that finishes loading afterwards must not start a worker.
@@ -1894,6 +1896,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._transcribing_video = video
         self._arriving_transcript = []
         self._worker_progress.clear()
+        self._unfinished_worker_progress_line = ""
         _LOGGER.info("Transcribing the speech of %s (channel %d)", video.input_video, video.input_channel)
         self._transcription_runner.start_transcription(
             ballroom_scribe.cli.arguments.InputCacheArgs(
@@ -1945,13 +1948,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self._speech_refresh_timer.start()
 
     def _on_worker_progress(self, text: str) -> None:
-        """Keeps the worker's latest progress text, which explains a failure."""
+        """Logs every line of the worker's progress and keeps the latest lines, which explain a failure."""
         if self._transcribing_video is None:
             return
-        for line in text.splitlines():
-            if line.strip():
-                self._worker_progress.append(line)
-                _LOGGER.debug("Transcription worker: %s", line)
+        lines, self._unfinished_worker_progress_line = ballroom_scribe.gui.utils.split_console_lines(
+            self._unfinished_worker_progress_line,
+            text,
+        )
+        self._keep_worker_progress(lines)
+
+    def _keep_worker_progress(self, lines: Sequence[str]) -> None:
+        for line in lines:
+            self._worker_progress.append(line)
+            _LOGGER.debug("Transcription worker: %s", line)
 
     def _on_transcription_finished(self, exit_code: int) -> None:
         video = self._transcribing_video
@@ -1961,6 +1970,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._speech_refresh_timer.stop()
         transcript = tuple(self._arriving_transcript)
         self._arriving_transcript = []
+        # The last line of a worker that crashed may never have been ended.
+        if self._unfinished_worker_progress_line.strip():
+            self._keep_worker_progress([self._unfinished_worker_progress_line])
+        self._unfinished_worker_progress_line = ""
         if exit_code == 0:
             self._transcripts[video] = transcript
             self._shown_transcript = transcript
@@ -1974,10 +1987,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if transcript:
                 self._shown_transcript = transcript
             _LOGGER.warning(
-                "The transcription worker for %s (channel %d) failed with exit status %d. Its last output:\n%s",
+                "The transcription worker for %s (channel %d) %s. Its last output:\n%s",
                 video.input_video,
                 video.input_channel,
-                exit_code,
+                self._transcription_runner.exit_description,
                 "\n".join(self._worker_progress),
             )
             self.statusBar().showMessage(_TRANSCRIPTION_FAILED_MESSAGE, 15000)
