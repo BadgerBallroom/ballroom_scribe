@@ -4,6 +4,7 @@ from .compute_waveform_envelope import compute_waveform_envelope
 from .configure_logging import configure_logging
 from .create_app_icon import create_app_icon
 from .decode_transcript_chunk import decode_transcript_chunk
+from .distribute_column_widths import distribute_column_widths
 from .encode_transcript_chunk import encode_transcript_chunk
 from .ends_sentence import ends_sentence
 from .find_caption import find_caption
@@ -23,6 +24,7 @@ __all__ = [
     "configure_logging",
     "create_app_icon",
     "decode_transcript_chunk",
+    "distribute_column_widths",
     "encode_transcript_chunk",
     "ends_sentence",
     "find_caption",

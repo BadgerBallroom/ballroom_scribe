@@ -23,9 +23,16 @@ def _make_sample_records() -> list[ballroom_scribe.models.EventRecord]:
         ballroom_scribe.models.EventRecord(
             file=_VIDEO_A,
             inpoint_seconds=12.3456,
+            event_number="3",
+            flight="2",
+            heat="1",
+            age_division="Adult",
+            category="Amateur",
             level="Bronze",
             style="Standard",
             dance="Waltz",
+            dance_ordinal="First",
+            specialness="Critique",
             round="Final",
         ),
         ballroom_scribe.models.EventRecord(
@@ -62,13 +69,21 @@ class TestEventTableModel(unittest.TestCase):
                 self.model.headerData(col_index, QtCore.Qt.Orientation.Horizontal),
                 expected_header,
             )
+            self.assertEqual(
+                self.model.headerData(
+                    col_index,
+                    QtCore.Qt.Orientation.Horizontal,
+                    QtCore.Qt.ItemDataRole.ToolTipRole,
+                ),
+                expected_header,
+            )
 
         col = ballroom_scribe.gui.EventTableModel.Column
         self.assertFalse(bool(self.model.flags(self.model.index(0, col.FILE)) & QtCore.Qt.ItemFlag.ItemIsEditable))
         self.assertFalse(
             bool(self.model.flags(self.model.index(0, col.INPOINT_FORMATTED)) & QtCore.Qt.ItemFlag.ItemIsEditable)
         )
-        for editable_col in (col.INPOINT, col.LEVEL, col.STYLE, col.DANCE, col.ROUND, col.COMMENT):
+        for editable_col in (col.INPOINT, *ballroom_scribe.gui.EventTableModel.SEARCHABLE_COLUMNS):
             self.assertTrue(
                 bool(self.model.flags(self.model.index(0, editable_col)) & QtCore.Qt.ItemFlag.ItemIsEditable)
             )
@@ -179,9 +194,20 @@ class TestEventTableModel(unittest.TestCase):
 
     @parameterized.expand(
         [
+            param("event_number", column=ballroom_scribe.gui.EventTableModel.Column.EVENT_NUMBER, field="event_number"),
+            param("flight", column=ballroom_scribe.gui.EventTableModel.Column.FLIGHT, field="flight"),
+            param("heat", column=ballroom_scribe.gui.EventTableModel.Column.HEAT, field="heat"),
+            param("age_division", column=ballroom_scribe.gui.EventTableModel.Column.AGE_DIVISION, field="age_division"),
+            param("category", column=ballroom_scribe.gui.EventTableModel.Column.CATEGORY, field="category"),
             param("level", column=ballroom_scribe.gui.EventTableModel.Column.LEVEL, field="level"),
             param("style", column=ballroom_scribe.gui.EventTableModel.Column.STYLE, field="style"),
             param("dance", column=ballroom_scribe.gui.EventTableModel.Column.DANCE, field="dance"),
+            param(
+                "dance_ordinal",
+                column=ballroom_scribe.gui.EventTableModel.Column.DANCE_ORDINAL,
+                field="dance_ordinal",
+            ),
+            param("specialness", column=ballroom_scribe.gui.EventTableModel.Column.SPECIALNESS, field="specialness"),
             param("round", column=ballroom_scribe.gui.EventTableModel.Column.ROUND, field="round"),
             param("comment", column=ballroom_scribe.gui.EventTableModel.Column.COMMENT, field="comment"),
         ]
@@ -219,9 +245,16 @@ class TestFill(unittest.TestCase):
             param(
                 "inpoint_formatted", column=ballroom_scribe.gui.EventTableModel.Column.INPOINT_FORMATTED, expected=False
             ),
+            param("event_number", column=ballroom_scribe.gui.EventTableModel.Column.EVENT_NUMBER, expected=True),
+            param("flight", column=ballroom_scribe.gui.EventTableModel.Column.FLIGHT, expected=True),
+            param("heat", column=ballroom_scribe.gui.EventTableModel.Column.HEAT, expected=True),
+            param("age_division", column=ballroom_scribe.gui.EventTableModel.Column.AGE_DIVISION, expected=True),
+            param("category", column=ballroom_scribe.gui.EventTableModel.Column.CATEGORY, expected=True),
             param("level", column=ballroom_scribe.gui.EventTableModel.Column.LEVEL, expected=True),
-            param("style_as_int", column=4, expected=True),
+            param("style_as_int", column=int(ballroom_scribe.gui.EventTableModel.Column.STYLE), expected=True),
             param("dance", column=ballroom_scribe.gui.EventTableModel.Column.DANCE, expected=True),
+            param("dance_ordinal", column=ballroom_scribe.gui.EventTableModel.Column.DANCE_ORDINAL, expected=True),
+            param("specialness", column=ballroom_scribe.gui.EventTableModel.Column.SPECIALNESS, expected=True),
             param("round", column=ballroom_scribe.gui.EventTableModel.Column.ROUND, expected=True),
             param("comment", column=ballroom_scribe.gui.EventTableModel.Column.COMMENT, expected=False),
         ]
@@ -409,37 +442,82 @@ class TestHasSameEvent(unittest.TestCase):
                 ballroom_scribe.models.EventRecord(
                     file=_VIDEO_A,
                     inpoint_seconds=10.0,
+                    event_number="12",
+                    flight="1",
+                    heat="1",
+                    age_division="Adult",
+                    category="Amateur",
                     level="Bronze",
                     style="Standard",
                     dance="Waltz",
+                    dance_ordinal="First",
+                    specialness="Critique",
                     round="Quarterfinal",
                 ),
                 ballroom_scribe.models.EventRecord(
                     file=_VIDEO_B,
                     inpoint_seconds=80.0,
+                    event_number="48",
+                    flight="2",
+                    heat="3",
+                    age_division=" adult ",
+                    category="AMATEUR",
                     level="bronze",
                     style="STANDARD",
                     dance="waltz",
+                    dance_ordinal="Second",
+                    specialness="critique",
                     round="Final",
                 ),
                 ballroom_scribe.models.EventRecord(
                     file=_VIDEO_A,
                     inpoint_seconds=45.0,
+                    age_division="Adult",
+                    category="Amateur",
                     level="Bronze",
                     style="Standard",
                     dance="Tango",
+                    specialness="Critique",
                     round="Quarterfinal",
                 ),
             ]
         )
 
-    def test_matches_same_level_style_and_dance_across_rounds_and_videos_case_insensitively(self):
+    def test_matches_same_event_across_numbers_flights_heats_ordinals_rounds_and_videos_case_insensitively(self):
         self.assertTrue(self.model.has_same_event(0, 1))
         self.assertTrue(self.model.has_same_event(1, 0))
         self.assertTrue(self.model.has_same_event(0, 0))
 
-    def test_rejects_rows_with_different_level_style_or_dance(self):
-        self.assertFalse(self.model.has_same_event(0, 2))
+    def test_matches_when_optional_qualifiers_are_empty_in_both_rows(self):
+        base = ballroom_scribe.models.EventRecord(
+            file=_VIDEO_A,
+            inpoint_seconds=10.0,
+            level="Bronze",
+            style="Standard",
+            dance="Waltz",
+            round="Quarterfinal",
+        )
+        later = dataclasses.replace(base, inpoint_seconds=80.0, heat="2", round="Final")
+        self.model.set_records([base, later])
+
+        self.assertTrue(self.model.has_same_event(0, 1))
+
+    @parameterized.expand(
+        [
+            param("different_dance", changes={"dance": "Tango"}),
+            param("different_age_division", changes={"age_division": "All Ages"}),
+            param("missing_age_division", changes={"age_division": ""}),
+            param("different_category", changes={"category": "Rookie/Vet"}),
+            param("missing_category", changes={"category": ""}),
+            param("different_specialness", changes={"specialness": "Exhibition"}),
+            param("missing_specialness", changes={"specialness": ""}),
+        ]
+    )
+    def test_rejects_rows_differing_in_identifying_fields(self, _, changes: dict[str, str]):
+        first = self.model.record_at(0)
+        self.model.set_records([first, dataclasses.replace(first, **changes)])
+
+        self.assertFalse(self.model.has_same_event(0, 1))
 
     @parameterized.expand(
         [
@@ -486,6 +564,36 @@ class TestClearCell(unittest.TestCase):
     @parameterized.expand(
         [
             param(
+                "event_number",
+                column=ballroom_scribe.gui.EventTableModel.Column.EVENT_NUMBER,
+                original="3",
+                undo_text="Clear Event Number",
+            ),
+            param(
+                "flight",
+                column=ballroom_scribe.gui.EventTableModel.Column.FLIGHT,
+                original="2",
+                undo_text="Clear Flight",
+            ),
+            param(
+                "heat",
+                column=ballroom_scribe.gui.EventTableModel.Column.HEAT,
+                original="1",
+                undo_text="Clear Heat",
+            ),
+            param(
+                "age_division",
+                column=ballroom_scribe.gui.EventTableModel.Column.AGE_DIVISION,
+                original="Adult",
+                undo_text="Clear Age Division",
+            ),
+            param(
+                "category",
+                column=ballroom_scribe.gui.EventTableModel.Column.CATEGORY,
+                original="Amateur",
+                undo_text="Clear Category",
+            ),
+            param(
                 "level",
                 column=ballroom_scribe.gui.EventTableModel.Column.LEVEL,
                 original="Bronze",
@@ -502,6 +610,18 @@ class TestClearCell(unittest.TestCase):
                 column=ballroom_scribe.gui.EventTableModel.Column.DANCE,
                 original="Waltz",
                 undo_text="Clear Dance",
+            ),
+            param(
+                "dance_ordinal",
+                column=ballroom_scribe.gui.EventTableModel.Column.DANCE_ORDINAL,
+                original="First",
+                undo_text="Clear Dance Ordinal",
+            ),
+            param(
+                "specialness",
+                column=ballroom_scribe.gui.EventTableModel.Column.SPECIALNESS,
+                original="Critique",
+                undo_text="Clear Specialness",
             ),
             param(
                 "round",

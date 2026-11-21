@@ -137,12 +137,26 @@ def _column_text_value(record: ballroom_scribe.models.EventRecord, column: Event
             return f"{record.inpoint_seconds:.3f}"
         case EventTableModel.Column.INPOINT_FORMATTED:
             return record.inpoint_formatted
+        case EventTableModel.Column.EVENT_NUMBER:
+            return record.event_number
+        case EventTableModel.Column.FLIGHT:
+            return record.flight
+        case EventTableModel.Column.HEAT:
+            return record.heat
+        case EventTableModel.Column.AGE_DIVISION:
+            return record.age_division
+        case EventTableModel.Column.CATEGORY:
+            return record.category
         case EventTableModel.Column.LEVEL:
             return record.level
         case EventTableModel.Column.STYLE:
             return record.style
         case EventTableModel.Column.DANCE:
             return record.dance
+        case EventTableModel.Column.DANCE_ORDINAL:
+            return record.dance_ordinal
+        case EventTableModel.Column.SPECIALNESS:
+            return record.specialness
         case EventTableModel.Column.ROUND:
             return record.round
         case EventTableModel.Column.COMMENT:
@@ -160,12 +174,26 @@ def _with_text_value(
         ValueError: If `column` is not one of the free-text columns.
     """
     match column:
+        case EventTableModel.Column.EVENT_NUMBER:
+            return dataclasses.replace(record, event_number=text)
+        case EventTableModel.Column.FLIGHT:
+            return dataclasses.replace(record, flight=text)
+        case EventTableModel.Column.HEAT:
+            return dataclasses.replace(record, heat=text)
+        case EventTableModel.Column.AGE_DIVISION:
+            return dataclasses.replace(record, age_division=text)
+        case EventTableModel.Column.CATEGORY:
+            return dataclasses.replace(record, category=text)
         case EventTableModel.Column.LEVEL:
             return dataclasses.replace(record, level=text)
         case EventTableModel.Column.STYLE:
             return dataclasses.replace(record, style=text)
         case EventTableModel.Column.DANCE:
             return dataclasses.replace(record, dance=text)
+        case EventTableModel.Column.DANCE_ORDINAL:
+            return dataclasses.replace(record, dance_ordinal=text)
+        case EventTableModel.Column.SPECIALNESS:
+            return dataclasses.replace(record, specialness=text)
         case EventTableModel.Column.ROUND:
             return dataclasses.replace(record, round=text)
         case EventTableModel.Column.COMMENT:
@@ -188,14 +216,21 @@ def _rows_between(first: int, last: int) -> range:
     return range(first + step, last + step, step)
 
 
-def _event_key(record: ballroom_scribe.models.EventRecord) -> tuple[str, str, str] | None:
-    """Returns the case-folded `(level, style, dance)` key of `record`, or `None` when any of the three is empty."""
+def _event_key(record: ballroom_scribe.models.EventRecord) -> tuple[str, str, str, str, str, str] | None:
+    """Returns the case-folded identity of `record`'s event, or `None` when `Level`, `Style`, or `Dance` is empty."""
     level = record.level.strip()
     style = record.style.strip()
     dance = record.dance.strip()
     if not (level and style and dance):
         return None
-    return (level.casefold(), style.casefold(), dance.casefold())
+    return (
+        record.age_division.strip().casefold(),
+        record.category.strip().casefold(),
+        level.casefold(),
+        style.casefold(),
+        dance.casefold(),
+        record.specialness.strip().casefold(),
+    )
 
 
 def _compile_search_pattern(query: str, *, case_sensitive: bool) -> re.Pattern[str]:
@@ -233,11 +268,18 @@ class EventTableModel(QtCore.QAbstractTableModel):
         FILE = 0
         INPOINT = 1
         INPOINT_FORMATTED = 2
-        LEVEL = 3
-        STYLE = 4
-        DANCE = 5
-        ROUND = 6
-        COMMENT = 7
+        EVENT_NUMBER = 3
+        FLIGHT = 4
+        HEAT = 5
+        AGE_DIVISION = 6
+        CATEGORY = 7
+        LEVEL = 8
+        STYLE = 9
+        DANCE = 10
+        DANCE_ORDINAL = 11
+        SPECIALNESS = 12
+        ROUND = 13
+        COMMENT = 14
 
     class CommentDisplay(enum.Enum):
         """How `Column.COMMENT` presents itself: the comment text, or an icon telling whether one exists."""
@@ -247,10 +289,26 @@ class EventTableModel(QtCore.QAbstractTableModel):
 
     # The columns describing the event: autocompleted, fillable, and sharing the table's spare width.
     TEXT_COLUMNS = (
+        Column.EVENT_NUMBER,
+        Column.FLIGHT,
+        Column.HEAT,
+        Column.AGE_DIVISION,
+        Column.CATEGORY,
         Column.LEVEL,
         Column.STYLE,
         Column.DANCE,
+        Column.DANCE_ORDINAL,
+        Column.SPECIALNESS,
         Column.ROUND,
+    )
+    # Event columns that usually hold short numbers or ordinals and therefore take a narrower minimum/default width.
+    NARROW_TEXT_COLUMNS = frozenset(
+        {
+            Column.EVENT_NUMBER,
+            Column.FLIGHT,
+            Column.HEAT,
+            Column.DANCE_ORDINAL,
+        }
     )
     # Every free-text column, i.e. the scope of Find and Replace.
     SEARCHABLE_COLUMNS = (*TEXT_COLUMNS, Column.COMMENT)
@@ -397,7 +455,9 @@ class EventTableModel(QtCore.QAbstractTableModel):
             if role == QtCore.Qt.ItemDataRole.ToolTipRole:
                 return name
             return None
-        return name if role == QtCore.Qt.ItemDataRole.DisplayRole else None
+        if role in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.ToolTipRole):
+            return name
+        return None
 
     @override
     def flags(self, index: QtCore.QModelIndex | QtCore.QPersistentModelIndex) -> QtCore.Qt.ItemFlag:
@@ -496,7 +556,7 @@ class EventTableModel(QtCore.QAbstractTableModel):
         return True
 
     def clear_cell(self, index: QtCore.QModelIndex | QtCore.QPersistentModelIndex) -> bool:
-        """Empties a `Level`, `Style`, `Dance`, `Round`, or `Comment` cell as an undoable command.
+        """Empties a free-text cell (`Event Number` … `Comment`) as an undoable command.
 
         Returns:
             Whether the cell changed. Other columns, invalid indexes, and empty cells are left alone, and nothing is
@@ -739,7 +799,11 @@ class EventTableModel(QtCore.QAbstractTableModel):
         return row
 
     def has_same_event(self, row_a: int, row_b: int) -> bool:
-        """Returns whether `row_a` and `row_b` share the same non-empty `Level`, `Style`, and `Dance`."""
+        """Returns whether `row_a` and `row_b` describe the same event across rounds, heats, flights, or dances.
+
+        Requires non-empty `Level`, `Style`, and `Dance`, and compares case-folded `Age Division`, `Category`, `Level`,
+        `Style`, `Dance`, and `Specialness` (where empty strings match empty strings).
+        """
         if not (0 <= row_a < len(self._records) and 0 <= row_b < len(self._records)):
             return False
         key_a = _event_key(self._records[row_a])

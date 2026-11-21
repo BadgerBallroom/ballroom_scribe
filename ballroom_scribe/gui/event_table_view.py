@@ -52,8 +52,8 @@ class EventTableView(QtWidgets.QTableView):
         leaving `Space`, `,`, `.`, and `Ctrl+...` shortcuts intact) and opens the current cell's editor with the
         typed character replacing its value (requires `EditTrigger.AnyKeyPressed`, set by `MainWindow`). Type-to-search
         is disabled so typing never jumps to another row.
-    *   `Delete` and `Backspace` clear the current `Level`, `Style`, `Dance`, `Round`, or `Comment` cell as one undo
-        step via `EventTableModel.clear_cell` instead of deleting the event.
+    *   `Delete` and `Backspace` clear the current free-text cell (`Event Number` … `Comment`) as one undo step via
+        `EventTableModel.clear_cell` instead of deleting the event.
     *   The current cell of a fillable column (see `EventTableModel.is_fillable`) shows a small square in its
         bottom-right corner. Pressing it and dragging up or down outlines the rows passed over and, on release, copies
         the cell's value into them through `EventTableModel.fill` as one undo step. The press never reaches

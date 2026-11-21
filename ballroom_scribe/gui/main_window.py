@@ -28,9 +28,10 @@ _VIDEO_FILE_FILTER = "Video Files (*.mp4 *.mov *.mkv *.avi *.m4v *.webm *.mts *.
 _CSV_FILE_FILTER = "CSV Files (*.csv);;All Files (*)"
 _MIN_FILE_COLUMN_WIDTH = 160
 _MAX_FILE_COLUMN_WIDTH = 180
+_MIN_NARROW_COLUMN_WIDTH = 52
 _MIN_TEXT_COLUMN_WIDTH = 90
-# The `Comment` column shows its text only when it can start this wide while `Level` … `Round` keep their minimum;
-# otherwise it shrinks to a presence icon.
+# The `Comment` column shows its text only when it can start this wide while `Event Number` … `Round` keep their
+# minimums; otherwise it shrinks to a presence icon.
 _MIN_COMMENT_TEXT_WIDTH = 160
 _COMMENT_ICON_COLUMN_WIDTH = 28
 _DEFAULT_WINDOW_WIDTH = 1400
@@ -85,19 +86,23 @@ def _alt_is_held() -> bool:
 
 
 def _marker_label(row: int, record: ballroom_scribe.models.EventRecord) -> str:
-    parts = [part for part in (record.level, record.style, record.dance, record.round) if part]
-    return " ".join(parts) if parts else f"Event #{row + 1}"
-
-
-def _distribute_width(total: int, weights: Sequence[float]) -> list[int]:
-    """Splits `total` pixels across columns in proportion to `weights`, each at least `_MIN_TEXT_COLUMN_WIDTH`.
-
-    Rounding leftovers go to the last column so the columns fill `total` exactly.
-    """
-    total_weight = sum(weights)
-    widths = [max(_MIN_TEXT_COLUMN_WIDTH, round(total * weight / total_weight)) for weight in weights]
-    widths[-1] += max(0, total - sum(widths))
-    return widths
+    primary = [part for part in (record.level, record.style, record.dance, record.round) if part]
+    if primary:
+        return " ".join(primary)
+    fallback = [
+        part
+        for part in (
+            f"Event {record.event_number}" if record.event_number else "",
+            f"Flight {record.flight}" if record.flight else "",
+            f"Heat {record.heat}" if record.heat else "",
+            record.age_division,
+            record.category,
+            record.dance_ordinal,
+            record.specialness,
+        )
+        if part
+    ]
+    return " ".join(fallback) if fallback else f"Event #{row + 1}"
 
 
 def _locate_record_video(record_file: pathlib.Path, csv_dir: pathlib.Path) -> pathlib.Path | None:
@@ -575,7 +580,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
 
     def add_event_at_playhead(self) -> None:
-        """Adds an event for the active video at the playhead and starts editing its `Level`.
+        """Adds an event for the active video at the playhead and starts editing its `Event Number`.
 
         The row is placed among the active video's rows in `Inpoint` order (see `EventTableModel.add_record`).
         Nothing happens while the active video is offline, since it has no playhead.
@@ -585,18 +590,14 @@ class MainWindow(QtWidgets.QMainWindow):
         record = ballroom_scribe.models.EventRecord(
             file=self._active_video.csv_file,
             inpoint_seconds=round(self._player.position_seconds(), 3),
-            level="",
-            style="",
-            dance="",
-            round="",
         )
         insert_row = self._table_model.add_record(record)
-        level_index = self._table_model.index(
+        event_number_index = self._table_model.index(
             insert_row,
-            int(ballroom_scribe.gui.EventTableModel.Column.LEVEL),
+            int(ballroom_scribe.gui.EventTableModel.Column.EVENT_NUMBER),
         )
-        self._table_view.setCurrentIndex(level_index)
-        self._table_view.edit(level_index)
+        self._table_view.setCurrentIndex(event_number_index)
+        self._table_view.edit(event_number_index)
 
     def go_to_selected_event(self) -> None:
         """Moves the playhead to the selected row's `Inpoint`, switching to its video if needed.
@@ -820,6 +821,7 @@ class MainWindow(QtWidgets.QMainWindow):
         header = self._table_view.horizontalHeader()
         header.setStretchLastSection(False)  # `_fit_text_columns` fills the width; the comment column may stay narrow.
         header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+        header.setTextElideMode(QtCore.Qt.TextElideMode.ElideRight)
 
         # Rows are selected as a whole, so the delegates frame the current cell to show where typing or `Enter` edits.
         self._table_view.setItemDelegate(ballroom_scribe.gui.CurrentCellDelegate(self._table_view))
@@ -854,18 +856,23 @@ class MainWindow(QtWidgets.QMainWindow):
     def _fit_text_columns(self, *, equalize: bool) -> None:
         """Makes the text columns share the width left over by the other columns, fitting `Comment` in as it allows.
 
-        `Level`, `Style`, `Dance`, and `Round` always share that width. `Comment` joins them (starting at least
-        `_MIN_COMMENT_TEXT_WIDTH` wide) when the four can still keep `_MIN_TEXT_COLUMN_WIDTH` each; otherwise it
-        becomes a fixed `_COMMENT_ICON_COLUMN_WIDTH` column showing only whether a comment exists.
+        `Event Number` … `Round` (`TEXT_COLUMNS`) always share that width, with `NARROW_TEXT_COLUMNS` starting narrower
+        (`_MIN_NARROW_COLUMN_WIDTH`) than the wider text columns (`_MIN_TEXT_COLUMN_WIDTH`). `Comment` joins them
+        (starting at least `_MIN_COMMENT_TEXT_WIDTH` wide) when all event columns can still keep their minimums;
+        otherwise it becomes a fixed `_COMMENT_ICON_COLUMN_WIDTH` column showing only whether a comment exists.
 
         Args:
-            equalize: Give the shared columns equal widths; otherwise keep their current proportions (as adjusted by
-                the user) while filling the available width. A switch between the comment presentations always
-                re-equalizes, since the previous widths no longer mean anything.
+            equalize: Give the shared columns widths proportional to their minimums; otherwise keep their current
+                proportions (as adjusted by the user) while filling the available width. A switch between the comment
+                presentations always re-equalizes, since the previous widths no longer mean anything.
         """
         header = self._table_view.horizontalHeader()
         model_cls = ballroom_scribe.gui.EventTableModel
         shared = [int(column) for column in model_cls.TEXT_COLUMNS]
+        text_mins = [
+            _MIN_NARROW_COLUMN_WIDTH if column in model_cls.NARROW_TEXT_COLUMNS else _MIN_TEXT_COLUMN_WIDTH
+            for column in model_cls.TEXT_COLUMNS
+        ]
         comment = int(model_cls.Column.COMMENT)
         fixed_width = sum(
             header.sectionSize(section)
@@ -873,7 +880,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if section not in shared and section != comment
         )
         available = self._table_view.viewport().width() - fixed_width
-        compact = available < len(shared) * _MIN_TEXT_COLUMN_WIDTH + _MIN_COMMENT_TEXT_WIDTH
+        compact = available < sum(text_mins) + _MIN_COMMENT_TEXT_WIDTH
         display = model_cls.CommentDisplay.ICON if compact else model_cls.CommentDisplay.TEXT
         equalize = equalize or display != self._table_model.comment_display
         self._table_model.set_comment_display(display)
@@ -882,22 +889,20 @@ class MainWindow(QtWidgets.QMainWindow):
             header.setSectionResizeMode(comment, QtWidgets.QHeaderView.ResizeMode.Fixed)
             header.resizeSection(comment, _COMMENT_ICON_COLUMN_WIDTH)
             available -= _COMMENT_ICON_COLUMN_WIDTH
-            comment_width = None
+            min_widths = text_mins
+            default_weights = [float(width) for width in text_mins]
         else:
             header.setSectionResizeMode(comment, QtWidgets.QHeaderView.ResizeMode.Interactive)
             shared.append(comment)
-            comment_width = max(_MIN_COMMENT_TEXT_WIDTH, round(available / len(shared))) if equalize else None
-        available = max(available, len(shared) * _MIN_TEXT_COLUMN_WIDTH)
+            min_widths = [*text_mins, _MIN_COMMENT_TEXT_WIDTH if equalize else _MIN_TEXT_COLUMN_WIDTH]
+            default_weights = [*(float(width) for width in text_mins), float(_MIN_COMMENT_TEXT_WIDTH)]
 
-        if comment_width is not None:
-            widths = _distribute_width(available - comment_width, [1.0] * (len(shared) - 1)) + [comment_width]
-        else:
-            weights = [1.0] * len(shared)
-            if not equalize:
-                current = [float(header.sectionSize(section)) for section in shared]
-                if sum(current) > 0:
-                    weights = current
-            widths = _distribute_width(available, weights)
+        weights = default_weights
+        if not equalize:
+            current = [float(header.sectionSize(section)) for section in shared]
+            if sum(current) > 0:
+                weights = current
+        widths = ballroom_scribe.gui.utils.distribute_column_widths(available, weights, min_widths)
         for section, width in zip(shared, widths, strict=True):
             header.resizeSection(section, width)
 

@@ -75,9 +75,10 @@ flowchart TD
     starting timestamps of the emcee's announcements.
     *   Ollama handles freeing VRAM.
 6.  **Event Recording** ([event_recorder.py](ballroom_scribe/event_recorder.py)): Reads and writes event details in CSV
-    format with the columns `File`, `Inpoint`, `Inpoint Formatted`, `Level`, `Style`, `Dance`, `Round`, and
-    `Comment`. `Comment` holds free-text notes typed in the editor (the pipeline leaves it empty and never reads it);
-    CSVs written before it existed still open, with empty comments.
+    format with the columns `File`, `Inpoint`, `Inpoint Formatted`, `Event Number`, `Flight`, `Heat`, `Age Division`,
+    `Category`, `Level`, `Style`, `Dance`, `Dance Ordinal`, `Specialness`, `Round`, and `Comment`. `Comment` holds
+    free-text notes typed in the editor (the pipeline leaves it empty and never reads it); CSVs written before newer
+    optional columns existed still open, with empty values for omitted columns.
 
 Each stage that writes to the cache directory skips its work if its output file already exists, so rerunning an
 interrupted run resumes where it left off. To make this safe, cache files are written atomically
@@ -237,8 +238,9 @@ including Qt multimedia backend diagnostics, to the console.
 *   **Synchronized video and waveform**: Displays an audio waveform with click-to-seek, drag-to-pan (the audio follows
     the mouse), <kbd>Shift</kbd> + wheel or horizontal-wheel scrolling, per-video audio channel selection, and
     active-video event markers.
-*   **Interactive event table**: Click a row to switch to its video and jump to its inpoint. Other rows with the same
-    level, style, and dance are faintly highlighted so all rounds of the event stand out.
+*   **Interactive event table**: Click a row to switch to its video and jump to its inpoint. Other rows matching the
+    selected event (same non-empty level, style, and dance, plus matching age division, category, and specialness) are
+    faintly highlighted so all rounds and heats of the event stand out.
     *   Type an inpoint directly, or press **Set Inpoint** (<kbd>Ctrl</kbd> + <kbd>I</kbd>) to stamp the current video
         and playhead onto the selected row.
     *   **Add Event** (<kbd>Ctrl</kbd> + <kbd>E</kbd>) inserts a row for the active video at the playhead and opens it

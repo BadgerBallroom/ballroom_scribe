@@ -442,29 +442,48 @@ def _check_video_and_waveform(fixture: _Fixture) -> None:
         _expect((video.cache_dir / cache_file).exists(), f"Missing cache file {video.cache_dir / cache_file}")
 
 
+def _visible_cell_rect(view: QtWidgets.QTableView, index: QtCore.QModelIndex) -> QtCore.QRect:
+    """Scrolls `index` into the viewport and returns its viewport rectangle."""
+    view.scrollTo(index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
+    return view.visualRect(index)
+
+
 def _check_csv_row_jump_renders_frames(fixture: _Fixture) -> None:
     window = fixture.window
     clip = fixture.clip.resolve()
     second_clip = fixture.second_clip.resolve()
     initial_csv = fixture.work_dir / "initial_events.csv"
+    header_line = ",".join(ballroom_scribe.EventRecorder.COLUMNS)
     initial_csv.write_text(
-        "File,Inpoint,Inpoint Formatted,Level,Style,Dance,Round\n"
-        f"{clip},{_FIRST_ROW_SECONDS},0:00:02.50,Bronze,Standard,Waltz,Quarterfinal\n"
-        f"{clip},{_SECOND_ROW_SECONDS},0:00:06.75,Silver,Smooth,Tango,Final\n"
-        f"{second_clip},{_SECOND_CLIP_ROW_SECONDS},0:00:03.25,Gold,Latin,Cha Cha,Final\n",
+        f"{header_line}\n"
+        f"{clip},{_FIRST_ROW_SECONDS},0:00:02.50,3,1,1,Adult,Amateur,Bronze,Standard,Waltz,First,,Quarterfinal,\n"
+        f"{clip},{_SECOND_ROW_SECONDS},0:00:06.75,7,2,1,All Ages,Rookie/Vet,Silver,Smooth,Tango,Second,Critique,Final,\n"
+        f"{second_clip},{_SECOND_CLIP_ROW_SECONDS},0:00:03.25,12,1,2,Adult,Amateur,Gold,Latin,Cha Cha,,,Final,\n",
         encoding="utf-8",
     )
     _expect(window.open_csv(initial_csv), "open_csv failed")
     _expect(window.table_model.rowCount() == _INITIAL_ROW_COUNT, "CSV rows were not loaded into the table")
     _expect(len(window.session) == 2, "Opening the CSV did not load the second video it references")
 
-    # Level, Style, Dance, and Round share the remaining width equally and fill the table.
+    # Narrow numeric/ordinal columns share a compact width while regular text columns share a wider width.
     header = window.table_view.horizontalHeader()
-    col = ballroom_scribe.gui.EventTableModel.Column
-    text_widths = [header.sectionSize(int(column)) for column in (col.LEVEL, col.STYLE, col.DANCE, col.ROUND)]
+    model_cls = ballroom_scribe.gui.EventTableModel
+    col = model_cls.Column
+    narrow_widths = [
+        header.sectionSize(int(column)) for column in model_cls.TEXT_COLUMNS if column in model_cls.NARROW_TEXT_COLUMNS
+    ]
+    wide_widths = [
+        header.sectionSize(int(column))
+        for column in model_cls.TEXT_COLUMNS
+        if column not in model_cls.NARROW_TEXT_COLUMNS
+    ]
     _expect(
-        max(text_widths) - min(text_widths) <= 2,
-        f"Level/Style/Dance/Round widths are not equal: {text_widths}",
+        max(narrow_widths) - min(narrow_widths) <= 2 and min(narrow_widths) >= 52,
+        f"Narrow text column widths are uneven or below 52 px: {narrow_widths}",
+    )
+    _expect(
+        max(wide_widths) - min(wide_widths) <= 2 and min(wide_widths) >= 90 and min(wide_widths) > max(narrow_widths),
+        f"Regular text column widths are uneven or not wider than narrow columns: wide={wide_widths}, narrow={narrow_widths}",
     )
     # They fill the table (the columns may exceed it when the table is narrower than their minimum widths).
     total_width = sum(header.sectionSize(section) for section in range(header.count()))
@@ -493,7 +512,7 @@ def _check_csv_row_jump_renders_frames(fixture: _Fixture) -> None:
 
     # Clicking (or double-clicking to edit) inside the current row must not seek back to its inpoint.
     col = ballroom_scribe.gui.EventTableModel.Column
-    level_cell = window.table_view.visualRect(window.table_model.index(0, int(col.LEVEL))).center()
+    level_cell = _visible_cell_rect(window.table_view, window.table_model.index(0, int(col.LEVEL))).center()
     QtTest.QTest.mouseClick(window.table_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=level_cell)
     fixture.app.processEvents()
     _expect(
@@ -509,7 +528,7 @@ def _check_csv_row_jump_renders_frames(fixture: _Fixture) -> None:
     _cancel_cell_editor(fixture)
     # Clicking a different row still jumps to that row's inpoint (move the playhead away first).
     window.player.seek(4.0)
-    other_cell = window.table_view.visualRect(window.table_model.index(1, int(col.LEVEL))).center()
+    other_cell = _visible_cell_rect(window.table_view, window.table_model.index(1, int(col.LEVEL))).center()
     QtTest.QTest.mouseClick(window.table_view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=other_cell)
     fixture.app.processEvents()
     _expect(
@@ -534,6 +553,10 @@ def _colors_match(first: QtGui.QColor, second: QtGui.QColor) -> bool:
 def _sample_cell(view: QtWidgets.QTableView, image: QtGui.QImage, index: QtCore.QModelIndex) -> _CellSample:
     """Samples a cell's top edge (where the current-cell frame is drawn) and its interior, clear of its text."""
     rect = view.visualRect(index)
+    _expect(
+        view.viewport().rect().contains(rect),
+        f"Cell ({index.row()}, {index.column()}) rect {rect} lies outside viewport {view.viewport().rect()}",
+    )
     return _CellSample(
         edge=_viewport_pixel(image, QtCore.QPoint(rect.center().x(), rect.top() + 1)),
         interior=_viewport_pixel(image, QtCore.QPoint(rect.right() - _CELL_INTERIOR_INSET, rect.center().y())),
@@ -553,6 +576,7 @@ def _check_current_cell_frame(fixture: _Fixture) -> None:
     highlight = view.palette().color(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Highlight)
 
     view.setCurrentIndex(level_index)
+    view.scrollTo(style_index)  # Ensures both `Level` and adjacent `Style` are inside the horizontal viewport.
     fixture.app.processEvents()
     _expect(view.selectionModel().isRowSelected(0), "Setting the current cell did not select its row")
     image = view.viewport().grab().toImage()
@@ -589,10 +613,11 @@ def _check_current_cell_frame(fixture: _Fixture) -> None:
     )
     _focus_table(fixture)
 
-    # Other rows with the same non-empty Level, Style, and Dance as the selected row are faintly highlighted.
+    # Other rows matching the selected row's event are faintly highlighted (and differing Category prevents matching).
     style_row_0 = model.index(0, int(col.STYLE))
     style_row_2 = model.index(2, int(col.STYLE))
     view.setCurrentIndex(level_index)
+    view.scrollTo(style_index)
     fixture.app.processEvents()
     plain_row_2 = _sample_cell(view, view.viewport().grab().toImage(), style_row_2).interior
     original_records = model.records
@@ -604,23 +629,34 @@ def _check_current_cell_frame(fixture: _Fixture) -> None:
         ]
     )
     view.setCurrentIndex(model.index(0, int(col.LEVEL)))
+    view.scrollTo(style_row_0)
     fixture.app.processEvents()
     image = view.viewport().grab().toImage()
     tinted_row_2 = _sample_cell(view, image, style_row_2).interior
     selected_row_0 = _sample_cell(view, image, style_row_0).interior
     _expect(
         not _colors_match(tinted_row_2, plain_row_2),
-        f"Row with the same Level/Style/Dance was not faintly highlighted ({tinted_row_2.name()} vs {plain_row_2.name()})",
+        f"Row with the same event was not faintly highlighted ({tinted_row_2.name()} vs {plain_row_2.name()})",
     )
     _expect(
         not _colors_match(tinted_row_2, selected_row_0),
         f"Faintly highlighted row ({tinted_row_2.name()}) looks identical to the selected row ({selected_row_0.name()})",
     )
-    view.setCurrentIndex(model.index(1, int(col.LEVEL)))
+    model.set_records(
+        [
+            original_records[0],
+            original_records[1],
+            dataclasses.replace(
+                original_records[2], category="Rookie/Vet", level="bronze", style="Standard", dance="Waltz"
+            ),
+        ]
+    )
+    view.setCurrentIndex(model.index(0, int(col.LEVEL)))
+    view.scrollTo(style_row_0)
     fixture.app.processEvents()
     _expect(
         _colors_match(_sample_cell(view, view.viewport().grab().toImage(), style_row_2).interior, plain_row_2),
-        "Row stayed faintly highlighted after selecting a row with a different event",
+        "Row with a different Category was still faintly highlighted as the same event",
     )
     model.set_records(original_records)
     view.setCurrentIndex(model.index(0, int(col.LEVEL)))
@@ -1029,7 +1065,9 @@ def _check_waveform_click_and_drag(fixture: _Fixture) -> None:
     )
 
     # Clicking inside the waveform-highlighted row (row 1) to edit it must not jump back to 6.75 s.
-    QtTest.QTest.mouseClick(view.viewport(), left, pos=view.visualRect(model.index(1, int(col.LEVEL))).center())
+    QtTest.QTest.mouseClick(
+        view.viewport(), left, pos=_visible_cell_rect(view, model.index(1, int(col.LEVEL))).center()
+    )
     fixture.app.processEvents()
     _expect(
         abs(player.position_seconds() - after_drag_left) < 1e-6,
@@ -1048,7 +1086,9 @@ def _check_waveform_click_and_drag(fixture: _Fixture) -> None:
         f"Clicking waveform before the first event ({waveform.position_seconds:.3f} s) left selected_rows="
         f"{view.selected_rows()}",
     )
-    QtTest.QTest.mouseClick(view.viewport(), left, pos=view.visualRect(model.index(0, int(col.LEVEL))).center())
+    QtTest.QTest.mouseClick(
+        view.viewport(), left, pos=_visible_cell_rect(view, model.index(0, int(col.LEVEL))).center()
+    )
     fixture.app.processEvents()
     _expect(
         view.selected_rows() == (0,)
@@ -1114,7 +1154,9 @@ def _check_waveform_click_and_drag(fixture: _Fixture) -> None:
     waveform.reset_zoom()
 
     # 5. Holding Alt while clicking the waveform moves the playhead without changing the selected row.
-    QtTest.QTest.mouseClick(view.viewport(), left, pos=view.visualRect(model.index(0, int(col.LEVEL))).center())
+    QtTest.QTest.mouseClick(
+        view.viewport(), left, pos=_visible_cell_rect(view, model.index(0, int(col.LEVEL))).center()
+    )
     fixture.app.processEvents()
     QtTest.QTest.mouseClick(waveform, left, _ALT, pos=point_at(7.5))
     fixture.app.processEvents()
@@ -1466,7 +1508,12 @@ def _check_editing_commands(fixture: _Fixture) -> None:
         rows() == [(clip, 4.125), (clip, 7.5), (clip, 8.25), (second_clip, 3.25)],
         f"Add Event at 8.25 s did not place the row after the video's events: {rows()}",
     )
-    _expect(view.currentIndex().row() == 2 and view.state() == editing, "The new event is not open for editing")
+    _expect(
+        view.currentIndex().row() == 2
+        and view.currentIndex().column() == int(col.EVENT_NUMBER)
+        and view.state() == editing,
+        "The new event is not open for editing on Event Number",
+    )
     _cancel_cell_editor(fixture)
     window.player.seek(5.0)
     window.add_event_at_playhead()
@@ -1560,7 +1607,7 @@ def _check_editing_commands(fixture: _Fixture) -> None:
     QtTest.QTest.mouseClick(
         view.viewport(),
         QtCore.Qt.MouseButton.LeftButton,
-        pos=view.visualRect(model.index(2, int(col.LEVEL))).center(),
+        pos=_visible_cell_rect(view, model.index(2, int(col.LEVEL))).center(),
     )
     fixture.app.processEvents()
     _expect(
@@ -1885,10 +1932,11 @@ def _check_multi_row_selection(fixture: _Fixture) -> None:
     highlight = view.palette().color(QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorRole.Highlight)
 
     def cell_center(row: int, column: ballroom_scribe.gui.EventTableModel.Column = col.LEVEL) -> QtCore.QPoint:
-        return view.visualRect(model.index(row, int(column))).center()
+        return _visible_cell_rect(view, model.index(row, int(column))).center()
 
     # Sample row 0's plain unselected Style background (row 2 has a different event, so row 0 is untinted).
     view.setCurrentIndex(model.index(2, int(col.LEVEL)))
+    view.scrollTo(model.index(2, int(col.STYLE)))
     fixture.app.processEvents()
     plain_row_0 = _sample_cell(view, viewport.grab().toImage(), model.index(0, int(col.STYLE))).interior
 
@@ -1913,6 +1961,8 @@ def _check_multi_row_selection(fixture: _Fixture) -> None:
 
     # 2. No single cell is singled out while several rows are selected.
     _expect(view.fill_handle_rect(view.currentIndex()).isNull(), "Fill handle is still shown with 2 rows selected")
+    view.scrollTo(model.index(2, int(col.STYLE)))
+    fixture.app.processEvents()
     image = viewport.grab().toImage()
     current_level = _sample_cell(view, image, model.index(2, int(col.LEVEL)))
     mate_style = _sample_cell(view, image, model.index(2, int(col.STYLE)))
@@ -1944,6 +1994,7 @@ def _check_multi_row_selection(fixture: _Fixture) -> None:
 
     # A plain click on row 2 collapses the selection back to one row and restores the frame and fill handle.
     QtTest.QTest.mouseClick(viewport, left, pos=cell_center(2))
+    view.scrollTo(model.index(2, int(col.STYLE)))
     fixture.app.processEvents()
     _expect(
         view.selected_rows() == (2,) and not view.has_multiple_selected_rows,
@@ -2041,7 +2092,7 @@ def _check_multi_row_selection(fixture: _Fixture) -> None:
     _expect(list(model.records) == five_rows, "Undo did not restore the last 2 deleted rows")
 
     # 8. Clicking below the last row clears the selection, disables both actions, and keeps the current cell framed.
-    last_rect = view.visualRect(model.index(4, int(col.LEVEL)))
+    last_rect = _visible_cell_rect(view, model.index(4, int(col.LEVEL)))
     below_last = QtCore.QPoint(last_rect.center().x(), last_rect.bottom() + 20)
     QtTest.QTest.mouseClick(viewport, left, pos=below_last)
     fixture.app.processEvents()
@@ -2086,7 +2137,7 @@ def _check_go_to_event_and_alt_navigation(fixture: _Fixture) -> None:
     row_2_inpoint = model.record_at(2).inpoint_seconds
 
     def cell_center(row: int, column: ballroom_scribe.gui.EventTableModel.Column = col.LEVEL) -> QtCore.QPoint:
-        return view.visualRect(model.index(row, int(column))).center()
+        return _visible_cell_rect(view, model.index(row, int(column))).center()
 
     # 1. Click row 0, seek elsewhere, and press Ctrl+G to jump back to row 0's Inpoint.
     QtTest.QTest.mouseClick(viewport, left, pos=cell_center(0))
@@ -2182,7 +2233,7 @@ def _check_go_to_event_and_alt_navigation(fixture: _Fixture) -> None:
         abs(player.position_seconds() - 1.0) < 1e-3,
         "Ctrl+G or go_to_selected_event moved the playhead with 2 rows selected",
     )
-    last_rect = view.visualRect(model.index(2, int(col.LEVEL)))
+    last_rect = _visible_cell_rect(view, model.index(2, int(col.LEVEL)))
     below_last = QtCore.QPoint(last_rect.center().x(), last_rect.bottom() + 20)
     QtTest.QTest.mouseClick(viewport, left, pos=below_last)
     fixture.app.processEvents()
@@ -2251,7 +2302,7 @@ def _check_find_and_replace(fixture: _Fixture) -> None:
     fixture.app.processEvents()
 
     def cell_center(row: int, column: ballroom_scribe.gui.EventTableModel.Column = col.LEVEL) -> QtCore.QPoint:
-        return view.visualRect(model.index(row, int(column))).center()
+        return _visible_cell_rect(view, model.index(row, int(column))).center()
 
     QtTest.QTest.mouseClick(viewport, left, pos=cell_center(0))
     fixture.app.processEvents()
@@ -2559,7 +2610,7 @@ def _check_comment_column(fixture: _Fixture) -> None:
         # Shift+Enter starts a new line.
         view.setCurrentIndex(model.index(0, 0))
         fixture.app.processEvents()
-        cell_rect = view.visualRect(comment_index)
+        cell_rect = _visible_cell_rect(view, comment_index)
         QtTest.QTest.mouseClick(viewport, left, pos=cell_rect.center())
         fixture.app.processEvents()
         editor = comment_editor()
@@ -2586,7 +2637,7 @@ def _check_comment_column(fixture: _Fixture) -> None:
         )
 
         # 3. Esc discards an edit.
-        QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(comment_index).center())
+        QtTest.QTest.mouseClick(viewport, left, pos=_visible_cell_rect(view, comment_index).center())
         fixture.app.processEvents()
         editor = comment_editor()
         QtTest.QTest.keyClicks(editor, "discarded")
@@ -2598,10 +2649,10 @@ def _check_comment_column(fixture: _Fixture) -> None:
 
         # 4. A wide table shows the first line of the comment, with an ellipsis for the rest, in a text column that
         # starts at least 160 px wide; double-clicking it opens the same overlay with the whole comment. How wide the
-        # table has to be depends on the size of the font, which sets the widths of the columns before `Level`.
+        # table has to be depends on the size of the font, which sets the widths of the columns before `Event Number`.
         table_width = 1000
         set_table_width(table_width)
-        while model.comment_display != display.TEXT and table_width < 2000:
+        while model.comment_display != display.TEXT and table_width < 2500:
             table_width += 250
             set_table_width(table_width)
         _expect(
@@ -2612,7 +2663,7 @@ def _check_comment_column(fixture: _Fixture) -> None:
             header.sectionSize(int(col.COMMENT)) >= 160, f"Text column is {header.sectionSize(int(col.COMMENT))} px"
         )
         _expect(model.data(comment_index) == "Check music …", f"Comment cell shows {model.data(comment_index)!r}")
-        QtTest.QTest.mouseDClick(viewport, left, pos=view.visualRect(comment_index).center())
+        QtTest.QTest.mouseDClick(viewport, left, pos=_visible_cell_rect(view, comment_index).center())
         fixture.app.processEvents()
         editor = comment_editor()
         _expect(editor.toPlainText() == comment_text, f"Overlay opened with {editor.toPlainText()!r}")
@@ -2981,12 +3032,12 @@ def _check_offline_videos(fixture: _Fixture) -> None:
     _expect(model.rowCount() == row_count, "Add Event added a row for an offline video")
 
     # 3. Clicking a loaded video's row brings media back; clicking an offline row blacks it out again.
-    QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(model.index(0, int(col.LEVEL))).center())
+    QtTest.QTest.mouseClick(viewport, left, pos=_visible_cell_rect(view, model.index(0, int(col.LEVEL))).center())
     fixture.app.processEvents()
     _expect_source(fixture, fixture.clip, "after clicking a loaded video's row")
     expect_dropdown(clip, "after clicking a loaded video's row")
     _expect(not waveform.is_offline, "The waveform kept the offline slate after switching to a loaded video")
-    QtTest.QTest.mouseClick(viewport, left, pos=view.visualRect(model.index(2, int(col.LEVEL))).center())
+    QtTest.QTest.mouseClick(viewport, left, pos=_visible_cell_rect(view, model.index(2, int(col.LEVEL))).center())
     fixture.app.processEvents()
     expect_offline("after clicking an offline video's row")
     expect_dropdown(ghost, "after clicking an offline video's row")
@@ -3114,6 +3165,10 @@ def _check_save_round_trip(fixture: _Fixture) -> None:
     window = fixture.window
     saved_csv = fixture.work_dir / "saved_events.csv"
     _expect(any(record.comment for record in window.table_model.records), "No comment left to round-trip")
+    _expect(
+        any(record.event_number and record.category == "Rookie/Vet" for record in window.table_model.records),
+        "New event metadata columns are not populated before round-trip",
+    )
     _expect(window.save_csv(saved_csv), "save_csv failed")
     _expect(window.table_model.undo_stack.isClean(), "Saving did not mark the document clean")
     reloaded = list(ballroom_scribe.EventRecorder().read(saved_csv))

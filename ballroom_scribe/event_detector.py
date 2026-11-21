@@ -18,17 +18,28 @@ import ballroom_scribe.utils
 _SYSTEM_PROMPT = """
 You are a data extraction assistant for a ballroom dance competition. The spoken words from a video of a competition
 have been transcribed into text. When you are given a chunk of the transcript, you must identify whether the emcee
-announces any dance heats. For each event, extract the level, style, dance, round, and a quote of what the emcee
-actually said:
+announces any dance heats. For each event, extract the event number, flight number, heat number, age division, category,
+level, style, dance, dance ordinal, specialness, and round; cite the quote from which you extracted that information:
 
+*   If the emcee specifically says "event <number>," extract the number.
+*   If the emcee specifically mentions the heat or flight number or mentions the nth heat or nth flight, extract it.
+*   Age divisions ensure that dancers only compete with others of similar ages. Common terms include "Youth," "Adult,"
+    "Senior," and "All Ages."
+*   The category denotes whether the competitors are being paid to dance. The common terms are "Amateur" and
+    "Professional," and "Pro-Am" means that in each couple, one person is a professional while the other is an amateur.
+    In some competitions, you may also see "Mixed Proficiency" or "Rookie/Vet".
 *   The level is the skill level of the dancers, such as "Newcomer," "Bronze", "Silver", "Gold", "Novice", "Pre-Champ",
-    "Championship," or "Syllabus." You may also encounter a "fun" or "showcase" level.
+    "Championship," or "Syllabus."
 *   The style is the category of the type of dance, such as "Smooth," "Standard," "Rhythm," or "Latin."
 *   The dance is the specific dance style being announced, such as "Waltz", "Tango", "Foxtrot," "Viennese Waltz,"
     "Quickstep," "Cha Cha," "Samba," "Rumba," "Jive," "Swing", or "Bolero."
     *   There often is more than one per event, in which case you should output all of them, separated by slashes (`/`).
     *   Especially for some of the more advanced levels like Gold and up, there might only be one multi-dance event for
         that level (e.g., "Gold Standard Semifinal"). In this case, the emcee won't mention a dance.
+*   The emcee may announce the dance by its index in a sequence of dances, as in "first dance," "second dance," "third
+    dance," and so on. Extract this as the dance ordinal.
+*   Competitions may have *special* events, which are not competitive. If the emcee says "exhibition," "critique,"
+    "fun," "showcase," or anything that indicates that the event is not judged, extract it. Most events are not special.
 *   The round is the stage of the competition, such as "Preliminary", "Quarterfinal", "Semifinal", or "Final."
 *   The quote is the exact sentence or phrase from the transcript that you are referencing.
 
@@ -87,13 +98,33 @@ _SCHEMA = {
             "items": {
                 "type": "object",
                 "properties": {
+                    "event_number": {"type": "string"},
+                    "flight": {"type": "string"},
+                    "heat": {"type": "string"},
+                    "age_division": {"type": "string"},
+                    "category": {"type": "string"},
                     "level": {"type": "string"},
                     "style": {"type": "string"},
                     "dance": {"type": "string"},
+                    "dance_ordinal": {"type": "string"},
+                    "specialness": {"type": "string"},
                     "round": {"type": "string"},
                     "quote": {"type": "string"},
                 },
-                "required": ["level", "style", "dance", "round", "quote"],
+                "required": [
+                    "event_number",
+                    "flight",
+                    "heat",
+                    "age_division",
+                    "category",
+                    "level",
+                    "style",
+                    "dance",
+                    "dance_ordinal",
+                    "specialness",
+                    "round",
+                    "quote",
+                ],
             },
         },
     },
@@ -102,43 +133,106 @@ _SCHEMA = {
 
 _EXAMPLES = (
     (
-        "Judges, refresh your tablets. Newcomers, find a spot on the floor. Your first dance is the Boeing 747.",
+        "Judges, refresh your tablets. This is the all ages newcomer critique. Your first dance is the Boeing 747.",
         {
             "events": [
                 {
+                    "event_number": "",
+                    "flight": "",
+                    "heat": "",
+                    "age_division": "All Ages",
+                    "category": "",
                     "level": "Newcomer",
                     "style": "",
                     "dance": "Boeing 747",
-                    "round": "Final",
-                    "quote": "Newcomers, find a spot on the floor. Your first dance is the Boeing 747.",
+                    "dance_ordinal": "First",
+                    "specialness": "Critique",
+                    "round": "",
+                    "quote": "This is the all ages newcomer critique. Your first dance is the Boeing 747.",
                 },
             ],
         },
     ),
     (
-        "We now return to heat thirty-four, the Gold Standard Semifinal. Dancers, please take your places.",
+        "We now return to heat thirty-four, the Adult Amateur Gold Standard four-dance Semifinal.",
         {
             "events": [
                 {
+                    "event_number": "",
+                    "flight": "",
+                    "heat": "Thirty-four",
+                    "age_division": "Adult",
+                    "category": "Amateur",
                     "level": "Gold",
                     "style": "Standard",
                     "dance": "",
+                    "dance_ordinal": "",
+                    "specialness": "",
                     "round": "Semifinal",
-                    "quote": "We now return to heat thirty-four, the Gold Standard Semifinal.",
+                    "quote": "We now return to heat thirty-four, the Adult Amateur Gold Standard four-dance Semifinal.",
                 },
             ],
         },
     ),
     (
-        "Moving along. We welcome to the floor the broad smooth Venus waltz quarter final.",
+        "Thank you, dancers. Find a spot on the floor for your second dance, the quick step.",
         {
             "events": [
                 {
+                    "event_number": "",
+                    "flight": "",
+                    "heat": "",
+                    "age_division": "",
+                    "category": "",
+                    "level": "",
+                    "style": "",
+                    "dance": "Quickstep",
+                    "dance_ordinal": "Second",
+                    "specialness": "",
+                    "round": "",
+                    "quote": "Find a spot on the floor for your second dance, the quick step.",
+                }
+            ]
+        },
+    ),
+    (
+        "Moving along. We welcome to the floor flight 2 of event 3 the broad smooth Venus waltz quarter final.",
+        {
+            "events": [
+                {
+                    "event_number": "3",
+                    "flight": "2",
+                    "heat": "",
+                    "age_division": "",
+                    "category": "",
                     "level": "Bronze",
                     "style": "Smooth",
                     "dance": "Viennese waltz",
+                    "dance_ordinal": "",
+                    "specialness": "",
                     "round": "Quarterfinal",
-                    "quote": "We welcome to the floor the broad smooth Venus waltz quarter final.",
+                    "quote": "We welcome to the floor flight 2 of event 3 the broad smooth Venus waltz quarter final.",
+                },
+            ],
+        },
+    ),
+    (
+        "We welcome back heat 1 of the rookie vet waltz tango. Judges, recall 28 from 2 heats.",
+        {
+            "events": [
+                {
+                    "event_number": "",
+                    "flight": "",
+                    "heat": "1",
+                    "age_division": "",
+                    "category": "Rookie/Vet",
+                    "level": "",
+                    "style": "",
+                    "dance": "Waltz/Tango",
+                    "dance_ordinal": "",
+                    "specialness": "",
+                    "round": "",
+                    "quote": "We welcome back heat 1 of the rookie vet waltz tango.",
                 },
             ],
         },
@@ -200,9 +294,16 @@ def _dict_to_event(d: dict, words: Sequence[ballroom_scribe.models.Word]) -> bal
     """
     quote = str(d.get("quote", ""))
     return ballroom_scribe.models.Event(
+        event_number=str(d.get("event_number", "")),
+        flight=str(d.get("flight", "")),
+        heat=str(d.get("heat", "")),
+        age_division=str(d.get("age_division", "")),
+        category=str(d.get("category", "")),
         level=str(d.get("level", "")),
         style=str(d.get("style", "")),
         dance=str(d.get("dance", "")),
+        dance_ordinal=str(d.get("dance_ordinal", "")),
+        specialness=str(d.get("specialness", "")),
         round=str(d.get("round", "")),
         announcement_quote=quote,
         announcement_start_seconds=_align_quote(quote=quote, words=words),
@@ -225,11 +326,6 @@ def _make_placeholder_event(
         An event with empty text fields whose timestamp is the midpoint of the music valley.
     """
     return ballroom_scribe.models.Event(
-        level="",
-        style="",
-        dance="",
-        round="",
-        announcement_quote="",
         announcement_start_seconds=chunk.midpoint_seconds,
         speech_detected=speech_detected,
         event_detected=False,

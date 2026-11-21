@@ -72,7 +72,7 @@ def _shares_selected_event(
     option: QtWidgets.QStyleOptionViewItem,
     index: QtCore.QModelIndex | QtCore.QPersistentModelIndex,
 ) -> bool:
-    """Returns whether `index` is on an unselected row sharing `(Level, Style, Dance)` with the selected row."""
+    """Returns whether `index` is on an unselected row sharing the selected row's event (`EventTableModel.has_same_event`)."""
     view = option.widget
     if not isinstance(view, ballroom_scribe.gui.EventTableView):
         return False
@@ -111,10 +111,11 @@ class CurrentCellDelegate(QtWidgets.QStyledItemDelegate):
     as Windows 11) draw no focus indicator on top, so keyboard users cannot tell which cell `Enter`, `F2`, or typing
     will edit. While the view has keyboard focus (exactly when those keys reach it), the current cell keeps the row's
     plain background and gets a thick frame in the selection colour, which stands out on light and dark palettes
-    alike and moves with the arrow keys. Other rows with the same non-empty `Level`, `Style`, and `Dance` as the
-    selected row receive a faint tint of the selection colour over their plain background. When two or more rows are
-    selected, no cell is singled out: the focused cell is painted like the rest of its selected row (without a frame or
-    focus rectangle) and the faint same-event highlight is off.
+    alike and moves with the arrow keys. Other rows matching the selected row's event (non-empty `Level`, `Style`, and
+    `Dance`, plus matching `Age Division`, `Category`, and `Specialness`) receive a faint tint of the selection colour
+    over their plain background. When two or more rows are selected, no cell is singled out: the focused cell is
+    painted like the rest of its selected row (without a frame or focus rectangle) and the faint same-event highlight
+    is off.
     """
 
     @override

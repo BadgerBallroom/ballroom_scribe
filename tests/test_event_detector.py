@@ -78,6 +78,24 @@ class TestAlignQuote(unittest.TestCase):
         )
 
 
+class TestSchemaAndExamples(unittest.TestCase):
+    """Unit tests verifying consistency between `_SCHEMA` and `_EXAMPLES`."""
+
+    def test_examples_match_schema_and_quotes_appear_in_prompts(self):
+        item_schema = ballroom_scribe.event_detector._SCHEMA["properties"]["events"]["items"]
+        expected_keys = tuple(item_schema["properties"].keys())
+        self.assertEqual(tuple(item_schema["required"]), expected_keys)
+
+        for prompt, assistant in ballroom_scribe.event_detector._EXAMPLES:
+            self.assertEqual(tuple(assistant.keys()), ("events",))
+            for event in assistant["events"]:
+                self.assertEqual(tuple(event.keys()), expected_keys)
+                for key, value in event.items():
+                    self.assertIsInstance(value, str, f"Non-string value for {key!r} in example {prompt!r}")
+                self.assertTrue(event["quote"], f"Empty quote in positive example {prompt!r}")
+                self.assertIn(event["quote"], prompt)
+
+
 class TestParseResponse(unittest.TestCase):
     """Unit tests for the `_parse_response` function."""
 
@@ -85,14 +103,21 @@ class TestParseResponse(unittest.TestCase):
         self.mock_align_quote = self.enterContext(patch.object(ballroom_scribe.event_detector, "_align_quote"))
 
     def test_parse_valid_json(self):
-        quote = "Next onto the floor is the Bronze Smooth Waltz Final."
+        quote = "We welcome to the floor flight 2 of event 3, heat 1, All Ages Rookie/Vet Bronze Smooth Waltz First Critique Final."
         response_json = json.dumps(
             {
                 "events": [
                     {
+                        "event_number": "3",
+                        "flight": "2",
+                        "heat": "1",
+                        "age_division": "All Ages",
+                        "category": "Rookie/Vet",
                         "level": "Bronze",
                         "style": "Smooth",
                         "dance": "Waltz",
+                        "dance_ordinal": "First",
+                        "specialness": "Critique",
                         "round": "Final",
                         "quote": quote,
                     },
@@ -109,9 +134,16 @@ class TestParseResponse(unittest.TestCase):
             events,
             [
                 ballroom_scribe.models.Event(
+                    event_number="3",
+                    flight="2",
+                    heat="1",
+                    age_division="All Ages",
+                    category="Rookie/Vet",
                     level="Bronze",
                     style="Smooth",
                     dance="Waltz",
+                    dance_ordinal="First",
+                    specialness="Critique",
                     round="Final",
                     announcement_quote=quote,
                     announcement_start_seconds=45.5,
@@ -142,11 +174,7 @@ class TestParseResponse(unittest.TestCase):
             events,
             [
                 ballroom_scribe.models.Event(
-                    level="",
-                    style="",
                     dance="Samba",
-                    round="",
-                    announcement_quote="",
                     announcement_start_seconds=25.0,
                     speech_detected=True,
                     event_detected=True,
@@ -160,6 +188,9 @@ class TestParseResponse(unittest.TestCase):
             {
                 "events": [
                     {
+                        "event_number": 34,
+                        "flight": 2,
+                        "heat": 1,
                         "level": 1,
                         "style": None,
                         "dance": "Tango",
@@ -176,6 +207,9 @@ class TestParseResponse(unittest.TestCase):
             events,
             [
                 ballroom_scribe.models.Event(
+                    event_number="34",
+                    flight="2",
+                    heat="1",
                     level="1",
                     style="None",
                     dance="Tango",

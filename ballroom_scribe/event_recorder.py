@@ -50,14 +50,24 @@ def _parse_row(row: Mapping[str, str | None], row_number: int) -> ballroom_scrib
     if not math.isfinite(inpoint_seconds) or inpoint_seconds < 0.0:
         raise ValueError(f"Row {row_number}: 'Inpoint' must be a non-negative finite number, got {raw_inpoint!r}.")
 
+    # `csv.DictReader` uses `restval=None` (which the `_REQUIRED_COLUMNS` check above relies on to reject short rows),
+    # so a hand-edited row that omits trailing commas for optional columns present in the header has `row[col] is None`.
+    # Using `row.get(col) or ""` instead of `row.get(col, "")` turns both missing keys and `None` values into `""`.
     return ballroom_scribe.models.EventRecord(
         file=pathlib.Path(raw_file),
         inpoint_seconds=inpoint_seconds,
+        event_number=row.get("Event Number") or "",
+        flight=row.get("Flight") or "",
+        heat=row.get("Heat") or "",
+        age_division=row.get("Age Division") or "",
+        category=row.get("Category") or "",
         level=row["Level"] or "",
         style=row["Style"] or "",
         dance=row["Dance"] or "",
+        dance_ordinal=row.get("Dance Ordinal") or "",
+        specialness=row.get("Specialness") or "",
         round=row["Round"] or "",
-        comment=row.get("Comment") or "",  # Optional: files written before comments existed load without it.
+        comment=row.get("Comment") or "",
     )
 
 
@@ -68,9 +78,16 @@ class EventRecorder:
         "File",
         "Inpoint",
         "Inpoint Formatted",
+        "Event Number",
+        "Flight",
+        "Heat",
+        "Age Division",
+        "Category",
         "Level",
         "Style",
         "Dance",
+        "Dance Ordinal",
+        "Specialness",
         "Round",
         "Comment",
     )
@@ -97,9 +114,16 @@ class EventRecorder:
                         record.file,
                         record.inpoint_seconds,
                         record.inpoint_formatted,
+                        record.event_number,
+                        record.flight,
+                        record.heat,
+                        record.age_division,
+                        record.category,
                         record.level,
                         record.style,
                         record.dance,
+                        record.dance_ordinal,
+                        record.specialness,
                         record.round,
                         record.comment,
                     )
@@ -132,7 +156,8 @@ class EventRecorder:
         """Streams `EventRecord`s from an existing CSV file.
 
         `Inpoint Formatted` and any extra unknown columns are ignored (`Inpoint Formatted` is recomputed on save), and
-        the `Comment` column is optional: files written before it existed load with empty comments.
+        columns added after the initial format (`Event Number`, `Flight`, `Heat`, `Age Division`, `Category`, `Dance
+        Ordinal`, `Specialness`, and `Comment`) are optional so older CSVs load with empty values for them.
 
         Args:
             source: Path to the CSV file to read.

@@ -16,19 +16,33 @@ class EventRecord:
     Attributes:
         file: Path to the video file containing the event, as stored in the CSV's `File` column.
         inpoint_seconds: Event start position in seconds from the beginning of `file`.
+        event_number: The event number in the competition program, if any.
+        flight: The flight number or ordinal within the event, if any.
+        heat: The heat number or ordinal within the round, if any.
+        age_division: The age division, such as youth, adult, senior, or all ages.
+        category: The competitor category, such as amateur, professional, pro-am, or rookie/vet.
         level: The ballroom proficiency level, such as bronze, silver, gold, or novice.
         style: The category of the dance, such as smooth, standard, rhythm, or Latin.
         dance: The dance itself, such as waltz, quickstep, rumba, or jive.
+        dance_ordinal: Which dance in a multi-dance sequence is being danced, such as first or second.
+        specialness: Non-competitive event designation, such as exhibition, critique, fun, or showcase.
         round: The competition round, such as quarterfinal, semifinal, or final.
         comment: Free-text annotation for human readers, possibly spanning several lines; never used by the pipeline.
     """
 
     file: pathlib.Path
     inpoint_seconds: float
-    level: str
-    style: str
-    dance: str
-    round: str
+    event_number: str = ""
+    flight: str = ""
+    heat: str = ""
+    age_division: str = ""
+    category: str = ""
+    level: str = ""
+    style: str = ""
+    dance: str = ""
+    dance_ordinal: str = ""
+    specialness: str = ""
+    round: str = ""
     comment: str = ""
 
     @property
@@ -50,8 +64,15 @@ class EventRecord:
         return cls(
             file=input_video,
             inpoint_seconds=event.announcement_start_seconds,
+            event_number=event.event_number,
+            flight=event.flight,
+            heat=event.heat,
+            age_division=event.age_division,
+            category=event.category,
             level=event.level,
             style=event.style,
             dance=event.dance,
+            dance_ordinal=event.dance_ordinal,
+            specialness=event.specialness,
             round=event.round,
         )
