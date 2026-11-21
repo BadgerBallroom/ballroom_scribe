@@ -158,6 +158,12 @@
     `faulthandler` and `FreezeWatchdog` write to the same file when the process
     dies or its GUI thread hangs, which is why the file that
     `open_session_log` returns is never closed.
+*   **Reporting problems**: Whatever tells the user that something failed
+    should lead to `MainWindow.report_problem`, which writes the session's
+    report file (`write_problem_report`) and shows `ProblemReportDialog`. The
+    report is made of the session's logs, so a failure that is not logged is
+    not in the report. The report can contain file paths and transcribed
+    speech, so nothing may send it anywhere: the user does.
 *   **No Python on Qt's worker threads**: Never install a Python
     `qInstallMessageHandler`, and never connect plain Python callables to
     signals emitted from non-GUI threads (`QVideoSink.videoFrameChanged`,
@@ -165,7 +171,9 @@
     renderer threads, which must acquire the GIL while the GUI thread may hold
     it inside a blocking Qt call and deadlock (observed on Windows). Connect
     such signals to bound methods of `QObject`s living in the GUI thread so Qt
-    queues the delivery.
+    queues the delivery. `UnhandledExceptionReporter`'s `sys.excepthook` runs on
+    whichever thread raised the exception, so it only logs and emits a signal
+    that is delivered to the GUI thread this way.
 
 ### Typing and Python 3.14 Idioms
 
@@ -225,9 +233,9 @@ these conventions for what does and doesn't have unit tests:
     `tests/gui/test_*.py`)**: Non-widget GUI logic (`VideoSession`,
     `EventTableModel`, `PipelineRunner`, `run_transcription_worker`,
     `run_editor`, `parse_editor_args`, `FreezeWatchdog`,
-    `WaveformLoader._prepare_envelope`) is unit-tested headlessly. Tests that
-    import `PySide6` skip cleanly via `unittest.SkipTest` when the optional GUI
-    dependency is not installed.
+    `UnhandledExceptionReporter`, `WaveformLoader._prepare_envelope`) is
+    unit-tested headlessly. Tests that import `PySide6` skip cleanly via
+    `unittest.SkipTest` when the optional GUI dependency is not installed.
 *   **Lazy exports and import footprint (`tests/test_lazy_exports.py`,
     `tests/gui/test_import_footprint.py`)**: Regression tests verify that every
     package's `__init__.pyi` exports are sorted and resolvable — both lazily and
@@ -256,10 +264,10 @@ these conventions for what does and doesn't have unit tests:
     (`smoke_test_editor.py`), and thin Qt painting/wiring widgets, dialogs,
     and delegates (`MainWindow`, `VideoPlayerWidget`, `CaptionedVideoWidget`,
     `WaveformWidget`, `EventTableView`, `PipelineDialog`,
-    `AutocompleteDelegate`, `CurrentCellDelegate`) do not have unit tests; the
-    smoke test drives them, and the model operations and pure helpers they
-    rely on (e.g. `EventTableModel.fill`, `merge_speech_markers`,
-    `layout_captions`) are unit-tested.
+    `ProblemReportDialog`, `AutocompleteDelegate`, `CurrentCellDelegate`) do
+    not have unit tests; the smoke test drives them, and the model operations
+    and pure helpers they rely on (e.g. `EventTableModel.fill`,
+    `merge_speech_markers`, `layout_captions`) are unit-tested.
 *   **Pure data containers (`ballroom_scribe/models/`,
     `ballroom_scribe/gui/models/`)**: Frozen dataclasses that only declare
     fields or trivial one-line formatting properties (e.g., `Event`,

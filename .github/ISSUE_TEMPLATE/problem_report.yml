@@ -1,0 +1,31 @@
+name: Problem report
+description: Report a crash, a freeze, or a failed Auto-Find Events run.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        In the editor, **Help → Report a Problem…** saves a report file and fills in this form for you. If you got
+        here another way, please do that first if you can: the report file holds what the editor logged.
+  # The editor fills in the fields below from the query parameters that are named like their `id`s (see
+  # `ballroom_scribe/gui/utils/build_issue_url.py`), so keep the `id`s and that file in step.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What went wrong, and what were you doing when it happened?
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: The editor fills this in with the version of Ballroom Scribe and the software that it runs on.
+      render: text
+  - type: textarea
+    id: report-file
+    attributes:
+      label: Report file
+      description: >-
+        Drag the report file here. It contains file names and folder paths from your computer, and it may contain
+        speech that was transcribed from your videos. Issues are public, so look through the file first.

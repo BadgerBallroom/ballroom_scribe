@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import MagicMock, call, patch
 
 try:
-    import PySide6  # noqa: F401
+    from PySide6 import QtCore
 except ImportError as err:
     raise unittest.SkipTest("PySide6 is not installed.") from err
 
@@ -51,6 +51,11 @@ class TestRunEditor(unittest.TestCase):
         self.mock_app.exec.return_value = 0
         self.mock_window_cls = self.enterContext(patch.object(ballroom_scribe.gui, "MainWindow", autospec=True))
         self.mock_window = self.mock_window_cls.return_value
+        self.mock_exception_reporter_cls = self.enterContext(
+            patch.object(ballroom_scribe.gui, "UnhandledExceptionReporter", autospec=True)
+        )
+        self.mock_exception_reporter = self.mock_exception_reporter_cls.return_value
+        self.mock_exception_reporter.exception_reported = MagicMock()
         self.mock_watchdog_cls = self.enterContext(patch.object(ballroom_scribe.gui, "FreezeWatchdog", autospec=True))
         self.mock_watchdog = self.mock_watchdog_cls.return_value
 
@@ -104,6 +109,36 @@ class TestRunEditor(unittest.TestCase):
 
         self.mock_watchdog_cls.assert_called_once_with(self.mock_session_log, self.mock_app)
         self.assertEqual(manager.mock_calls, [call.watchdog.start(), call.app.exec(), call.watchdog.stop()])
+
+    def test_window_can_report_problems_with_the_logs_of_the_session(self):
+        ballroom_scribe.gui.run_editor([])
+
+        self.mock_window_cls.assert_called_once_with(session_logs=_SESSION_LOGS)
+
+    def test_window_hears_of_unhandled_exceptions_from_its_event_loop(self):
+        manager = MagicMock()
+        manager.attach_mock(self.mock_exception_reporter, "exception_reporter")
+        manager.attach_mock(self.mock_window_cls, "main_window")
+        manager.attach_mock(self.mock_app, "app")
+
+        ballroom_scribe.gui.run_editor([])
+
+        self.mock_exception_reporter_cls.assert_called_once_with(self.mock_app)
+        self.assertEqual(
+            [recorded for recorded in manager.mock_calls if not recorded[0].startswith("main_window().")],
+            [
+                # Installed before the window is created: an exception that ends the editor while it starts is
+                # logged like any other.
+                call.exception_reporter.install(),
+                call.main_window(session_logs=_SESSION_LOGS),
+                # Queued: the window tells the user after the code that raised the exception has finished failing.
+                call.exception_reporter.exception_reported.connect(
+                    self.mock_window.report_unhandled_exception,
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                ),
+                call.app.exec(),
+            ],
+        )
 
     def test_opens_what_the_command_line_names(self):
         self._set_arguments(inputs=[_VIDEO_INPUT], csv=pathlib.Path("competition.csv"))

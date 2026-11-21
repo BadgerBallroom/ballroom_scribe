@@ -331,6 +331,16 @@ python edit_timestamps.py --verbose C:\path\to\competition.csv
 Qt's own categorized logging can be controlled with `QT_LOGGING_RULES` (e.g. `qt.multimedia.*=true`), which overrides
 the rules enabled by `--verbose`.
 
+### Reporting a Problem
+
+If the editor crashes, freezes, or fails to find events, choose **Help → Report a Problem…**. It saves a report file
+and opens a GitHub issue with the details filled in. Attach the report file to the issue, or send the file to the
+maintainer. The editor offers the same when it notices a failure itself.
+
+The report file holds what the editor logged, so it contains file names and folder paths from your computer and may
+contain speech transcribed from your videos. Look through it before you share it. **Help → Open Log Folder** shows
+where the logs are kept.
+
 ### Smoke-Testing the Editor
 
 [smoke_test_editor.py](smoke_test_editor.py) checks the editor end to end on a new machine without needing real footage:

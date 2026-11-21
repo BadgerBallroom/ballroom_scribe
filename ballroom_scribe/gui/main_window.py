@@ -52,8 +52,15 @@ _WORKER_EXIT_TIMEOUT_SECONDS = 5.0
 _WORKER_PROGRESS_LINES = 30
 _TRANSCRIBING_MESSAGE = "Transcribing speech…"
 _TRANSCRIPTION_FAILED_MESSAGE = (
-    "Transcribing speech failed (see the log) and is switched off. Tools → Transcribe Speech in Background switches"
-    " it back on."
+    "Transcribing speech failed and is switched off. Help → Report a Problem… saves what went wrong, and Tools →"
+    " Transcribe Speech in Background switches it back on."
+)
+_REPORT_HEADLINE = "Report a Problem"
+_PIPELINE_FAILURE_HEADLINE = "Auto-Find Events failed"
+_UNHANDLED_EXCEPTION_HEADLINE = "Something went wrong in Ballroom Scribe"
+_UNHANDLED_EXCEPTION_ADVICE = (
+    "The editor is still running, but it may not work correctly from here on. Consider saving your work and"
+    " starting the editor again."
 )
 
 
@@ -242,6 +249,9 @@ class MainWindow(QtWidgets.QMainWindow):
     it is transcribed or read from the pipeline's cache. Only one worker runs at a time. It is killed when another
     video, channel, or cache directory is chosen, and before a pipeline run starts, because the pipeline has to be
     the only writer of the cache files (see `atomic_path`).
+
+    When something fails, the window offers to report it: `report_problem` writes the report file of the session and
+    shows `ProblemReportDialog`. The Help menu, a failed pipeline run, and an unhandled exception all lead there.
     """
 
     def __init__(
@@ -249,6 +259,7 @@ class MainWindow(QtWidgets.QMainWindow):
         parent: QtWidgets.QWidget | None = None,
         *,
         transcription_command: Sequence[str] = _TRANSCRIPTION_COMMAND,
+        session_logs: ballroom_scribe.gui.models.SessionLogs | None = None,
     ) -> None:
         """Initializes the instance.
 
@@ -258,6 +269,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 arguments. The window appends `-i VIDEO CHANNEL -c DIR` for the active video. The worker must print
                 one transcript chunk per line, as `run_transcription_worker` does, and exit with status `0` once
                 the transcript is complete.
+            session_logs: Where this run of the editor keeps its logs, which go into the reports of problems.
+                Without it, the window cannot report problems.
         """
         super().__init__(parent)
         app = QtGui.QGuiApplication.instance()
@@ -265,6 +278,9 @@ class MainWindow(QtWidgets.QMainWindow):
             app.setWindowIcon(ballroom_scribe.gui.utils.create_app_icon())
         self.resize(_DEFAULT_WINDOW_WIDTH, _DEFAULT_WINDOW_HEIGHT)
 
+        self._session_logs = session_logs
+        # Set while `ProblemReportDialog` is open, so that a second problem does not open a second dialog.
+        self._reporting_problem = False
         self._session = ballroom_scribe.gui.VideoSession()
         self._recorder = ballroom_scribe.EventRecorder()
         self._table_model = ballroom_scribe.gui.EventTableModel(self, video_rank=self._video_rank)
@@ -801,6 +817,44 @@ class MainWindow(QtWidgets.QMainWindow):
         self._show_speech()
         self._start_transcription()
 
+    def report_problem(self, summary: str = "", *, headline: str = _REPORT_HEADLINE, advice: str = "") -> None:
+        """Offers to report a problem: writes the report file of this session and shows `ProblemReportDialog`.
+
+        Does nothing if the window was created without `session_logs`, or while the dialog is open already.
+
+        Args:
+            summary: What went wrong, in a sentence or a few lines, or `""` if the user is reporting something that
+                the editor did not notice.
+            headline: What the dialog is about, in a few words.
+            advice: What the user should do now, if anything.
+        """
+        if self._session_logs is None or self._reporting_problem:
+            return
+        self._reporting_problem = True
+        try:
+            dialog = ballroom_scribe.gui.ProblemReportDialog(
+                self._session_logs,
+                headline=headline,
+                summary=summary,
+                advice=advice,
+                # On top of the dialog in which the problem occurred, if one is open.
+                parent=QtWidgets.QApplication.activeModalWidget() or self,
+            )
+            dialog.exec()
+        finally:
+            self._reporting_problem = False
+
+    @QtCore.Slot(str)
+    def report_unhandled_exception(self, description: str) -> None:
+        """Tells the user that the editor hit an error that it does not handle, and offers to report it.
+
+        Connect `UnhandledExceptionReporter.exception_reported` to this.
+
+        Args:
+            description: The error in one line, such as `ValueError: The inpoint is negative`.
+        """
+        self.report_problem(description, headline=_UNHANDLED_EXCEPTION_HEADLINE, advice=_UNHANDLED_EXCEPTION_ADVICE)
+
     @override
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         if not self._confirm_discard_or_save():
@@ -1079,6 +1133,19 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         self._sort_rows_action.triggered.connect(self.sort_rows_by_inpoint)
 
+        self._report_problem_action = QtGui.QAction("Report a Problem…", self)
+        _with_shortcut_hint(
+            self._report_problem_action,
+            "Save a report of this session to attach to a GitHub issue or to send to the maintainer",
+        )
+        self._report_problem_action.triggered.connect(lambda: self.report_problem())
+        self._report_problem_action.setEnabled(self._session_logs is not None)
+
+        self._open_log_folder_action = QtGui.QAction("Open Log Folder", self)
+        _with_shortcut_hint(self._open_log_folder_action, "Show the folder in which this session keeps its logs")
+        self._open_log_folder_action.triggered.connect(self._open_log_folder)
+        self._open_log_folder_action.setEnabled(self._session_logs is not None)
+
         file_menu = self.menuBar().addMenu("&File")
         file_menu.addAction(self._open_videos_action)
         file_menu.addAction(self._open_csv_action)
@@ -1127,6 +1194,10 @@ class MainWindow(QtWidgets.QMainWindow):
         repair_menu = tools_menu.addMenu("Repair")
         repair_menu.addAction(self._group_rows_action)
         repair_menu.addAction(self._sort_rows_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction(self._report_problem_action)
+        help_menu.addAction(self._open_log_folder_action)
 
         toolbar = self.addToolBar("Main")
         toolbar.setMovable(False)
@@ -1827,10 +1898,12 @@ class MainWindow(QtWidgets.QMainWindow):
             inputs=self._session.inputs(),
             default_output_csv=self._current_csv,
             has_unsaved_edits=not self._table_model.undo_stack.isClean(),
+            reports_problems=self._session_logs is not None,
             parent=self,
         )
         dialog.pipeline_starting.connect(self._yield_to_pipeline)
         dialog.pipeline_succeeded.connect(self._on_pipeline_succeeded)
+        dialog.report_requested.connect(self._report_failed_pipeline)
         dialog.exec()
         self._yielding_to_pipeline = False
         # Covers a failed or cancelled run (or none at all): the GUI extracts the audio itself again.
@@ -1856,6 +1929,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_csv(csv_path)
         # Recomputed from the pipeline's complete WAV while the dialog is still open.
         self._reload_waveform_if_missing()
+
+    def _report_failed_pipeline(self, summary: str) -> None:
+        self.report_problem(summary, headline=_PIPELINE_FAILURE_HEADLINE)
+
+    def _open_log_folder(self) -> None:
+        if self._session_logs is not None:
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(self._session_logs.directory)))
 
     def _reload_waveform_if_missing(self) -> None:
         if isinstance(self._active_video, ballroom_scribe.gui.models.LoadedVideo) and self._waveform.envelope is None:

@@ -1,4 +1,6 @@
 from .append_console_output import append_console_output
+from .build_issue_url import build_issue_url
+from .build_problem_report import build_problem_report
 from .comment_icon import comment_icon
 from .compute_waveform_envelope import compute_waveform_envelope
 from .configure_logging import configure_logging
@@ -19,11 +21,15 @@ from .layout_captions import layout_captions
 from .merge_speech_markers import merge_speech_markers
 from .open_session_log import open_session_log
 from .paint_frame import paint_frame
+from .reveal_file import reveal_file
 from .sort_rows_by_inpoint import sort_rows_by_inpoint
 from .split_console_lines import split_console_lines
+from .write_problem_report import write_problem_report
 
 __all__ = [
     "append_console_output",
+    "build_issue_url",
+    "build_problem_report",
     "comment_icon",
     "compute_waveform_envelope",
     "configure_logging",
@@ -44,6 +50,8 @@ __all__ = [
     "merge_speech_markers",
     "open_session_log",
     "paint_frame",
+    "reveal_file",
     "sort_rows_by_inpoint",
     "split_console_lines",
+    "write_problem_report",
 ]

@@ -11,8 +11,10 @@ from .manage_videos_dialog import ManageVideosDialog
 from .parse_editor_args import parse_editor_args
 from .pipeline_dialog import PipelineDialog
 from .pipeline_runner import PipelineRunner
+from .problem_report_dialog import ProblemReportDialog
 from .run_editor import run_editor
 from .run_transcription_worker import run_transcription_worker
+from .unhandled_exception_reporter import UnhandledExceptionReporter
 from .video_player_widget import VideoPlayerWidget
 from .video_session import VideoSession
 from .waveform_loader import WaveformLoader
@@ -31,6 +33,8 @@ __all__ = [
     "ManageVideosDialog",
     "PipelineDialog",
     "PipelineRunner",
+    "ProblemReportDialog",
+    "UnhandledExceptionReporter",
     "VideoPlayerWidget",
     "VideoSession",
     "WaveformLoader",

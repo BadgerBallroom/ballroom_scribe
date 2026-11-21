@@ -19,11 +19,13 @@ class PipelineDialog(QtWidgets.QDialog):
     """Configures output CSV and optional CLI flags, runs `PipelineRunner`, and streams output.
 
     Everything that the pipeline prints is also logged, one record per line, so that the output of a failed run is
-    still there after the dialog has been closed.
+    still there after the dialog has been closed. After a run that failed, the dialog offers to report it.
     """
 
     pipeline_starting = QtCore.Signal()
     pipeline_succeeded = QtCore.Signal(pathlib.Path)
+    # Carries what went wrong when the user asks to report a run that failed.
+    report_requested = QtCore.Signal(str)
 
     def __init__(
         self,
@@ -31,14 +33,28 @@ class PipelineDialog(QtWidgets.QDialog):
         *,
         default_output_csv: pathlib.Path | None = None,
         has_unsaved_edits: bool = False,
+        reports_problems: bool = False,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
+        """Initializes the instance.
+
+        Args:
+            inputs: The videos to find events in.
+            default_output_csv: The output CSV that the dialog proposes.
+            has_unsaved_edits: Whether loading the pipeline's output would discard edits of the table.
+            reports_problems: Whether to offer a **Report Problem…** button after a run that failed. Pressing it
+                emits `report_requested`.
+            parent: The Qt parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle("Auto-Find Events")
         self.resize(740, 520)
 
         self._inputs = list(inputs)
         self._has_unsaved_edits = has_unsaved_edits
+        self._reports_problems = reports_problems
+        # What went wrong in the last run, if it failed.
+        self._failure_summary = ""
         self._target_csv: pathlib.Path | None = None
         self._overwrite_log_line = False
         # The line of the pipeline's output that has not ended yet; it is logged once it has.
@@ -70,6 +86,7 @@ class PipelineDialog(QtWidgets.QDialog):
             initial_csv = self._inputs[0]["input_video"].with_suffix(".csv")
 
         self._output_edit = QtWidgets.QLineEdit(str(initial_csv) if initial_csv is not None else "", self)
+        self._output_edit.setObjectName("outputCsvEdit")
         self._output_edit.setPlaceholderText("Select output CSV path…")
         self._browse_button = QtWidgets.QPushButton("Browse…", self)
         self._browse_button.clicked.connect(self._browse_output_csv)
@@ -79,6 +96,7 @@ class PipelineDialog(QtWidgets.QDialog):
         output_row.addWidget(self._browse_button)
 
         self._extra_args_edit = QtWidgets.QLineEdit(self)
+        self._extra_args_edit.setObjectName("extraFlagsEdit")
         self._extra_args_edit.setPlaceholderText(
             "Optional flags, e.g. --pann-threshold-speech 0.2 --ollama-model gpt-oss:20b"
         )
@@ -88,23 +106,35 @@ class PipelineDialog(QtWidgets.QDialog):
         form.addRow("Extra CLI flags:", self._extra_args_edit)
 
         self._log_view = QtWidgets.QPlainTextEdit(self)
+        self._log_view.setObjectName("pipelineOutput")
         self._log_view.setReadOnly(True)
         self._log_view.setUndoRedoEnabled(False)
         mono_font = QtGui.QFontDatabase.systemFont(QtGui.QFontDatabase.SystemFont.FixedFont)
         self._log_view.setFont(mono_font)
 
         self._run_button = QtWidgets.QPushButton("Auto-Find Events", self)
+        self._run_button.setObjectName("runButton")
         self._run_button.setDefault(True)
         self._run_button.clicked.connect(self._start_pipeline)
 
         self._cancel_button = QtWidgets.QPushButton("Cancel", self)
+        self._cancel_button.setObjectName("cancelButton")
         self._cancel_button.setEnabled(False)
         self._cancel_button.clicked.connect(self._cancel_pipeline)
 
         self._close_button = QtWidgets.QPushButton("Close", self)
         self._close_button.clicked.connect(self.close)
 
+        self._report_button = QtWidgets.QPushButton("Report Problem…", self)
+        self._report_button.setObjectName("reportButton")
+        self._report_button.setToolTip(
+            "Save a report of the run that failed, to attach to a GitHub issue or to send to the maintainer"
+        )
+        self._report_button.hide()
+        self._report_button.clicked.connect(lambda: self.report_requested.emit(self._failure_summary))
+
         button_row = QtWidgets.QHBoxLayout()
+        button_row.addWidget(self._report_button)
         button_row.addStretch(1)
         button_row.addWidget(self._run_button)
         button_row.addWidget(self._cancel_button)
@@ -183,6 +213,8 @@ class PipelineDialog(QtWidgets.QDialog):
         self._overwrite_log_line = False
         self._unfinished_output_line = ""
         self._cancel_requested = False
+        self._failure_summary = ""
+        self._report_button.hide()
         self._set_running_ui(True)
         # Lets the main window stop its own audio extraction so the pipeline is the only writer of the cache.
         self.pipeline_starting.emit()
@@ -234,6 +266,8 @@ class PipelineDialog(QtWidgets.QDialog):
         else:
             _LOGGER.warning("The pipeline %s", self._runner.exit_description)
             self._append_log(f"\nThe pipeline {self._runner.exit_description}.\n")
+            self._failure_summary = f"Auto-Find Events failed: the pipeline {self._runner.exit_description}."
+            self._report_button.setVisible(self._reports_problems)
 
     def _set_running_ui(self, running: bool) -> None:
         self._run_button.setEnabled(not running)

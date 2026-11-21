@@ -17,11 +17,13 @@ import json
 import math
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from collections.abc import Callable, Iterator
 from typing import TextIO
 
@@ -75,6 +77,15 @@ _TRANSCRIPT_DIR_NAME = "transcripts"
 _SESSION_DIR_NAME = "session"
 # Short enough to keep the test quick, and long enough that a busy machine does not look frozen.
 _FREEZE_SECONDS = 1.0
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent
+_NEW_ISSUE_URL = "https://github.com/BadgerBallroom/ballroom_scribe/issues/new"
+# Longer addresses may not open on Windows.
+_MAX_ISSUE_URL_LENGTH = 2000
+_DIALOG_TIMEOUT_SECONDS = 10.0
+_UNHANDLED_ERROR = "The smoke test raised this on purpose"
+# `find_timestamps.py` rejects this flag before it does anything, so the pipeline's models are never run.
+_REJECTED_PIPELINE_FLAG = "--no-such-flag"
+_PIPELINE_TIMEOUT_SECONDS = 60.0
 _TRANSCRIPTION_TIMEOUT_SECONDS = 30.0
 _SPEECH_CHUNK_DELAY_SECONDS = 0.6
 _SPEECH_SAMPLE_RATE = 32_000
@@ -3767,6 +3778,249 @@ def _check_freeze_watchdog(fixture: _Fixture) -> None:
     _expect(freezes_recorded() == 1, "The freeze watchdog wrote stacks after it had been stopped")
 
 
+def _answer_problem_report(
+    inspect: Callable[[ballroom_scribe.gui.ProblemReportDialog], None],
+    failures: list[str],
+) -> Callable[[], None]:
+    """Returns what a timer runs inside the modal loop of the report dialog: it inspects the dialog and closes it.
+
+    Neither of the dialog's buttons is pressed, so the test opens no browser and no file manager.
+    """
+
+    def answer() -> None:
+        dialog = QtWidgets.QApplication.activeModalWidget()
+        if not isinstance(dialog, ballroom_scribe.gui.ProblemReportDialog):
+            failures.append(f"The report dialog did not open (active modal widget: {dialog})")
+            if dialog is not None:
+                dialog.close()
+            return
+        try:
+            inspect(dialog)
+        except Exception as err:  # noqa: BLE001  # Anything escaping would leave the modal dialog open forever.
+            failures.append(str(err) if isinstance(err, _SmokeTestError) else repr(err))
+        dialog.reject()
+
+    return answer
+
+
+def _check_issue_url(url: str) -> None:
+    """The address of the GitHub issue is short enough to open, and it fills in fields that the form has."""
+    address, _, query = url.partition("?")
+    _expect(address == _NEW_ISSUE_URL, f"The issue would be opened at {address}")
+    _expect(len(url) <= _MAX_ISSUE_URL_LENGTH, f"The address of the issue has {len(url)} characters")
+    fields = dict(urllib.parse.parse_qsl(query))
+    form = _REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / fields.get("template", "missing")
+    _expect(form.is_file(), f"The address names the form {fields.get('template')!r}, which the repository lacks")
+    form_text = form.read_text(encoding="utf-8")
+    for field in fields.keys() - {"template", "title"}:
+        _expect(f"    id: {field}\n" in form_text, f"The address fills in {field!r}, which {form.name} does not have")
+    _expect("Ballroom Scribe " in fields.get("environment", ""), "The address does not say which version this is")
+
+
+def _check_problem_report(fixture: _Fixture) -> None:
+    """Help → Report a Problem… saves a report file of the session's log and offers a filled-in GitHub issue."""
+    window = fixture.window
+    report_action = _action_named(window, "Report a Problem…")
+    _expect(report_action.isEnabled(), "Report a Problem… is disabled although the window has the session's logs")
+    _expect(_action_named(window, "Open Log Folder").isEnabled(), "Open Log Folder is disabled")
+    failures: list[str] = []
+    report_files: list[pathlib.Path] = []
+
+    def inspect(dialog: ballroom_scribe.gui.ProblemReportDialog) -> None:
+        report_file = dialog.report_file
+        _expect(report_file is not None and report_file.is_file(), f"No report file was written: {report_file}")
+        assert report_file is not None
+        _expect(
+            report_file.parent == fixture.session_logs.directory,
+            f"The report file is in {report_file.parent}, not with the logs of the session",
+        )
+        report = report_file.read_text(encoding="utf-8")
+        _expect(report.startswith("Ballroom Scribe problem report\n"), f"The report starts with {report[:60]!r}")
+        # The notice at the top of the file is wrapped, so its words are compared without regard to line breaks.
+        _expect("may contain speech" in " ".join(report.split()), "The report file does not say what it contains")
+        _expect("== Environment ==\nBallroom Scribe " in report, "The report does not say which version this is")
+        # The transcription that failed in an earlier check is in the session's log, so it is in the report.
+        _expect(
+            "Transcription worker: OSError: The model could not be downloaded." in report
+            and "exited with status 3" in report,
+            "The report lacks what the session logged about the transcription worker that failed",
+        )
+        notice = dialog.findChild(QtWidgets.QLabel, "privacyNotice")
+        _expect(
+            notice is not None and notice.isVisible() and "may contain speech" in notice.text(),
+            "The dialog does not warn about what the report file contains",
+        )
+        summary = dialog.findChild(QtWidgets.QPlainTextEdit, "summary")
+        _expect(summary is not None and not summary.isVisible(), "The dialog shows a summary of a failure")
+        _check_issue_url(dialog.issue_url)
+        report_files.append(report_file)
+
+    QtCore.QTimer.singleShot(0, _answer_problem_report(inspect, failures))
+    report_action.trigger()
+    fixture.app.processEvents()
+    _expect(not failures, "; ".join(failures))
+    _expect(len(report_files) == 1, "Report a Problem… did not open the report dialog")
+
+
+def _check_unhandled_exception(fixture: _Fixture) -> None:
+    """An exception that escapes a slot is logged with its traceback, and the window offers once to report it."""
+    window = fixture.window
+    log_path = fixture.session_logs.editor_log
+    log_size_before = log_path.stat().st_size
+    failures: list[str] = []
+    summaries: list[str] = []
+
+    def inspect(dialog: ballroom_scribe.gui.ProblemReportDialog) -> None:
+        summary = dialog.findChild(QtWidgets.QPlainTextEdit, "summary")
+        _expect(summary is not None and summary.isVisible(), "The dialog does not show what went wrong")
+        assert summary is not None
+        summaries.append(summary.toPlainText())
+        advice = dialog.findChild(QtWidgets.QLabel, "advice")
+        _expect(
+            advice is not None and advice.isVisible() and "still running" in advice.text(),
+            "The dialog does not say that the editor is still running",
+        )
+        _expect(
+            "title=RuntimeError" in dialog.issue_url,
+            f"The issue is not titled after the error: {dialog.issue_url[:120]}",
+        )
+        _check_issue_url(dialog.issue_url)
+
+    def fail() -> None:
+        raise RuntimeError(_UNHANDLED_ERROR)
+
+    def close_unexpected_dialog() -> None:
+        dialog = QtWidgets.QApplication.activeModalWidget()
+        if dialog is not None:
+            failures.append("A second dialog opened for an error that was raised again")
+            dialog.close()
+
+    reporter = ballroom_scribe.gui.UnhandledExceptionReporter(window)
+    reporter.exception_reported.connect(window.report_unhandled_exception, QtCore.Qt.ConnectionType.QueuedConnection)
+    previous_hook = sys.excepthook
+    reporter.install()
+    print("  (the RuntimeError that is logged next is raised on purpose)")
+    try:
+        # The same slot fails three times, as a handler with a mistake in it fails every time it is called.
+        for _ in range(3):
+            QtCore.QTimer.singleShot(0, fail)
+        QtCore.QTimer.singleShot(300, _answer_problem_report(inspect, failures))
+        _wait_until(
+            fixture.app,
+            lambda: bool(summaries) or bool(failures),
+            _DIALOG_TIMEOUT_SECONDS,
+            "the dialog about the unhandled exception",
+        )
+        QtCore.QTimer.singleShot(500, close_unexpected_dialog)
+        _settle(fixture.app, 1.0)
+    finally:
+        sys.excepthook = previous_hook
+    _expect(not failures, "; ".join(failures))
+    _expect(summaries == [f"RuntimeError: {_UNHANDLED_ERROR}"], f"The dialog said what went wrong as {summaries}")
+
+    with open(log_path, encoding="utf-8") as log:
+        log.seek(log_size_before)
+        logged = log.read()
+    _expect(
+        logged.count("Traceback (most recent call last):") == 1 and f"RuntimeError: {_UNHANDLED_ERROR}" in logged,
+        "The session log does not hold exactly one traceback of the error that was raised three times",
+    )
+
+
+def _check_failed_pipeline(fixture: _Fixture) -> None:
+    """A pipeline run that fails says how it ended and offers to report it, with what the pipeline printed."""
+    window = fixture.window
+    run_action = _action_named(window, "Auto-Find Events…")
+    _expect(run_action.isEnabled(), "Auto-Find Events… is disabled although videos are loaded")
+    # A dirty document would make the dialog ask before it starts the pipeline.
+    _expect(window.table_model.undo_stack.isClean(), "Document must be clean before the pipeline is run")
+    output_csv = fixture.work_dir / "pipeline_events.csv"
+    output_csv.unlink(missing_ok=True)
+    failures: list[str] = []
+    reported_summaries: list[str] = []
+
+    def inspect_report(report_dialog: ballroom_scribe.gui.ProblemReportDialog) -> None:
+        summary = report_dialog.findChild(QtWidgets.QPlainTextEdit, "summary")
+        _expect(summary is not None and summary.isVisible(), "The report dialog does not show what went wrong")
+        assert summary is not None
+        reported_summaries.append(summary.toPlainText())
+        _expect(report_dialog.report_file is not None, "No report file was written for the failed run")
+        assert report_dialog.report_file is not None
+        report = report_dialog.report_file.read_text(encoding="utf-8")
+        _expect(
+            f"find_timestamps.py: error: unrecognized arguments: {_REJECTED_PIPELINE_FLAG}" in report,
+            "The report lacks what the pipeline printed",
+        )
+        # The command line is logged the way a shell would want it typed, with quotes around a path that needs them.
+        _expect(
+            shlex.join(["--output-csv", str(output_csv), _REJECTED_PIPELINE_FLAG]) in report,
+            "The report lacks the command line of the pipeline",
+        )
+        _expect("The pipeline exited with status 2" in report, "The report does not say how the pipeline ended")
+        _check_issue_url(report_dialog.issue_url)
+
+    def drive_dialog() -> None:
+        """Runs the pipeline with a flag that it rejects and asks for a report (runs inside the dialog's loop)."""
+        dialog = window.findChild(ballroom_scribe.gui.PipelineDialog)
+        if dialog is None:
+            failures.append("Auto-Find Events… did not open its dialog")
+            return
+        run_button = dialog.findChild(QtWidgets.QPushButton, "runButton")
+        cancel_button = dialog.findChild(QtWidgets.QPushButton, "cancelButton")
+        try:
+            output_edit = dialog.findChild(QtWidgets.QLineEdit, "outputCsvEdit")
+            flags_edit = dialog.findChild(QtWidgets.QLineEdit, "extraFlagsEdit")
+            output_view = dialog.findChild(QtWidgets.QPlainTextEdit, "pipelineOutput")
+            report_button = dialog.findChild(QtWidgets.QPushButton, "reportButton")
+            _expect(
+                None not in (run_button, cancel_button, output_edit, flags_edit, output_view, report_button),
+                "The pipeline dialog lacks one of its controls",
+            )
+            assert run_button is not None and output_edit is not None and flags_edit is not None
+            assert output_view is not None and report_button is not None
+            _expect(not report_button.isVisible(), "The dialog offers to report a problem before anything has failed")
+            output_edit.setText(str(output_csv))
+            flags_edit.setText(_REJECTED_PIPELINE_FLAG)
+            run_button.click()
+            _expect(not run_button.isEnabled(), "The pipeline was not started")
+            _wait_until(
+                fixture.app,
+                run_button.isEnabled,
+                _PIPELINE_TIMEOUT_SECONDS,
+                "find_timestamps.py to reject its arguments",
+            )
+            output = output_view.toPlainText()
+            _expect(
+                f"error: unrecognized arguments: {_REJECTED_PIPELINE_FLAG}" in output,
+                f"The dialog does not show why the pipeline failed: {output[-300:]!r}",
+            )
+            _expect(
+                output.rstrip().endswith("The pipeline exited with status 2."),
+                f"The dialog does not say how the pipeline ended: {output[-120:]!r}",
+            )
+            _expect(report_button.isVisible(), "A run that failed does not offer to report the problem")
+            QtCore.QTimer.singleShot(0, _answer_problem_report(inspect_report, failures))
+            report_button.click()
+        except Exception as err:  # noqa: BLE001  # Anything escaping would leave the modal dialog open forever.
+            failures.append(str(err) if isinstance(err, _SmokeTestError) else repr(err))
+            if cancel_button is not None and cancel_button.isEnabled():
+                # The dialog does not close while the pipeline runs.
+                cancel_button.click()
+                _settle(fixture.app, 1.0)
+        dialog.close()
+
+    QtCore.QTimer.singleShot(0, drive_dialog)
+    run_action.trigger()
+    fixture.app.processEvents()
+    _expect(not failures, "; ".join(failures))
+    _expect(
+        reported_summaries == ["Auto-Find Events failed: the pipeline exited with status 2."],
+        f"The report dialog said what went wrong as {reported_summaries}",
+    )
+    _expect(not output_csv.exists(), "A pipeline that rejected its arguments wrote a CSV")
+    _expect(window.table_model.undo_stack.isClean(), "A failed pipeline run modified the document")
+
+
 def _check_close_during_transcription(fixture: _Fixture) -> None:
     """A window closes promptly while its transcription worker is still running, and the worker goes with it."""
     work_dir = fixture.work_dir
@@ -3854,6 +4108,9 @@ def _run_checks(fixture: _Fixture) -> None:
         ("Show transcribed speech as captions and along the waveform", _check_transcribed_speech),
         ("Keep the speech of a transcription worker that fails", _check_failed_transcription),
         ("Record the stacks of a GUI thread that is stuck", _check_freeze_watchdog),
+        ("Report a problem from the Help menu", _check_problem_report),
+        ("Offer to report an unhandled exception, once", _check_unhandled_exception),
+        ("Offer to report a pipeline run that fails", _check_failed_pipeline),
         ("Capture a screenshot", _save_screenshot),
         ("Close the session with Ctrl+W", _check_close_session_shortcut),
         ("Close a window while speech is being transcribed", _check_close_during_transcription),
@@ -3909,7 +4166,10 @@ def main(argv: list[str] | None = None) -> int:
         _write_transcription_worker(work_dir)
 
         app = QtWidgets.QApplication(sys.argv)
-        window = ballroom_scribe.gui.MainWindow(transcription_command=_transcription_command(work_dir))
+        window = ballroom_scribe.gui.MainWindow(
+            transcription_command=_transcription_command(work_dir),
+            session_logs=session_logs,
+        )
         _expect(not app.windowIcon().isNull(), "Application window icon was not set")
         _expect(not window.windowIcon().isNull(), "MainWindow icon was not set")
         window.show()

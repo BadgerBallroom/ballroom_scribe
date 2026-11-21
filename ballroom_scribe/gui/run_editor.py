@@ -9,6 +9,8 @@ import logging
 import sys
 from collections.abc import Sequence
 
+from PySide6 import QtCore
+
 import ballroom_scribe.gui
 import ballroom_scribe.gui.utils
 import ballroom_scribe.utils
@@ -20,7 +22,8 @@ def run_editor(argv: Sequence[str] | None = None) -> int:
     """Parses CLI arguments and runs the Ballroom Scribe timestamp editor until its window is closed.
 
     Everything that the editor logs goes to the log file of this session, whatever `--verbose` says, and so does the
-    stack of every thread if the process dies of a fatal error or its GUI thread freezes.
+    stack of every thread if the process dies of a fatal error or its GUI thread freezes. A Python exception that
+    nothing handles is logged there too, and the window offers to report it.
 
     Args:
         argv: The command-line arguments, or `None` for those of the process.
@@ -38,7 +41,16 @@ def run_editor(argv: Sequence[str] | None = None) -> int:
     _LOGGER.info("%s", ballroom_scribe.utils.describe_environment())
 
     app = ballroom_scribe.gui.utils.create_application(sys.argv)
-    window = ballroom_scribe.gui.MainWindow()
+    # Installed before the window is created, so that an exception that ends the editor while it starts is logged.
+    exception_reporter = ballroom_scribe.gui.UnhandledExceptionReporter(app)
+    exception_reporter.install()
+    window = ballroom_scribe.gui.MainWindow(session_logs=session_logs)
+    # Queued, so that the window tells the user from its event loop rather than from inside the hook, where the code
+    # that raised the exception has not finished failing yet.
+    exception_reporter.exception_reported.connect(
+        window.report_unhandled_exception,
+        QtCore.Qt.ConnectionType.QueuedConnection,
+    )
     watchdog = ballroom_scribe.gui.FreezeWatchdog(session_log, app)
     watchdog.start()
 
