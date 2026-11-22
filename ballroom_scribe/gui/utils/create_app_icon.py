@@ -1,11 +1,27 @@
-"""Renders the multi-resolution application icon for the Ballroom Scribe timestamp editor."""
+"""Renders the multi-resolution application icon for the Ballroom Scribe timestamp editor.
 
+To export the icon as a multi-resolution `.ico` file (for example, to assign to a Windows `.lnk` shortcut), run from
+the repository root:
+
+    python -m ballroom_scribe.gui.utils.create_app_icon C:\\path\\to\\edit_timestamps.ico
+"""
+
+import argparse
+import pathlib
+import struct
 from collections.abc import Sequence
 
 from PySide6 import QtCore, QtGui
 
 _CANVAS_SIZE = 128.0
 _ICON_SIZES = (16, 20, 24, 32, 48, 64, 128, 256, 512)
+_ICO_MAX_SIZE = 256
+_ICO_SIZES = (16, 20, 24, 32, 48, 64, 128, 256)
+_ICO_TYPE_ICON = 1
+_ICO_COLOR_PLANES = 1
+_ICO_BITS_PER_PIXEL = 32
+_ICO_HEADER_STRUCT = struct.Struct("<HHH")
+_ICO_ENTRY_STRUCT = struct.Struct("<BBBBHHII")
 
 _BADGE_INSET = 4.0
 _BADGE_RADIUS = 28.0
@@ -125,3 +141,87 @@ def create_app_icon(sizes: Sequence[int] = _ICON_SIZES) -> QtGui.QIcon:
     for size in sizes:
         icon.addPixmap(QtGui.QPixmap.fromImage(_render_icon_image(size)))
     return icon
+
+
+def _encode_png(image: QtGui.QImage) -> bytes:
+    """Encodes `image` as lossless PNG bytes in memory."""
+    byte_array = QtCore.QByteArray()
+    buffer = QtCore.QBuffer(byte_array)
+    buffer.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+    try:
+        if not image.save(buffer, "PNG"):
+            raise RuntimeError(f"Failed to encode {image.width()}x{image.height()} icon frame as PNG.")
+    finally:
+        buffer.close()
+    return bytes(byte_array)
+
+
+def _encode_ico(sizes: Sequence[int] = _ICO_SIZES) -> bytes:
+    """Renders and packs a multi-resolution Windows `.ico` binary containing PNG-compressed frames.
+
+    Args:
+        sizes: Square pixel edge lengths (`1`–`256`) to include in the `.ico` directory.
+
+    Returns:
+        Complete `.ico` file contents as `bytes`.
+
+    Raises:
+        ValueError: If `sizes` is empty or contains a dimension outside `1`–`256`.
+    """
+    if not sizes:
+        raise ValueError("At least one icon size must be provided.")
+    for size in sizes:
+        if size <= 0 or size > _ICO_MAX_SIZE:
+            raise ValueError(f"ICO frame size must be between 1 and {_ICO_MAX_SIZE}, got {size}.")
+
+    frames = [(size, _encode_png(_render_icon_image(size))) for size in sizes]
+    header = _ICO_HEADER_STRUCT.pack(0, _ICO_TYPE_ICON, len(frames))
+    offset = _ICO_HEADER_STRUCT.size + _ICO_ENTRY_STRUCT.size * len(frames)
+
+    entries: list[bytes] = []
+    for size, png_bytes in frames:
+        # In the Windows ICO directory entry format, a 1-byte dimension of `0` represents `256` pixels.
+        dim_byte = 0 if size == _ICO_MAX_SIZE else size
+        entries.append(
+            _ICO_ENTRY_STRUCT.pack(
+                dim_byte,
+                dim_byte,
+                0,
+                0,
+                _ICO_COLOR_PLANES,
+                _ICO_BITS_PER_PIXEL,
+                len(png_bytes),
+                offset,
+            )
+        )
+        offset += len(png_bytes)
+
+    return b"".join((header, *entries, *(png_bytes for _, png_bytes in frames)))
+
+
+# Run from the repository root to generate a multi-resolution `.ico` file (e.g. for a Windows shortcut):
+#     python -m ballroom_scribe.gui.utils.create_app_icon C:\path\to\edit_timestamps.ico
+def _write_ico(output_path: pathlib.Path, sizes: Sequence[int] = _ICO_SIZES) -> None:
+    """Writes a multi-resolution Windows `.ico` file of the application icon to `output_path`."""
+    output_path.write_bytes(_encode_ico(sizes))
+
+
+def _main(argv: Sequence[str] | None = None) -> int:
+    """CLI entry point for exporting the multi-resolution `.ico` file."""
+    parser = argparse.ArgumentParser(
+        prog="python -m ballroom_scribe.gui.utils.create_app_icon",
+        description="Exports the Ballroom Scribe editor icon as a multi-resolution Windows .ico file.",
+    )
+    parser.add_argument(
+        "output",
+        type=pathlib.Path,
+        help="Destination .ico file path.",
+    )
+    args = parser.parse_args(argv)
+    _write_ico(args.output)
+    print(f"Wrote multi-resolution icon ({', '.join(f'{s}x{s}' for s in _ICO_SIZES)}) to {args.output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
